@@ -96,11 +96,11 @@ test('projects are private until shared, and roles are enforced', async () => {
   assert.equal((await owner('POST', `/projects/${pid}/members`, { email: 'vic@agency.test', role: 'viewer' })).status, 200);
 
   assert.equal((await viewer('GET', `/projects/${pid}`)).data.role, 'viewer');
-  assert.equal((await viewer('POST', `/projects/${pid}/keywords`, { text: 'boiler repair' })).status, 403);
+  assert.equal((await viewer('POST', `/projects/${pid}/uploads`, { text: 'boiler repair' })).status, 403);
   assert.equal((await viewer('PUT', `/projects/${pid}`, { name: 'Hacked' })).status, 403);
   assert.equal((await viewer('GET', `/projects/${pid}/export?type=all`)).status, 200);
 
-  const add = await editor('POST', `/projects/${pid}/keywords`, { text: 'boiler repair leeds\nplumber jobs' });
+  const add = await editor('POST', `/projects/${pid}/uploads`, { text: 'boiler repair leeds\nplumber jobs', filename: 'day-1.csv' });
   assert.equal(add.status, 200);
   assert.equal(add.data.added, 2);
   assert.equal((await editor('DELETE', `/projects/${pid}`)).status, 403);
@@ -108,52 +108,81 @@ test('projects are private until shared, and roles are enforced', async () => {
 
   assert.equal((await stranger('GET', '/projects')).data.length, 0);
   assert.equal((await viewer('GET', '/projects')).data[0].role, 'viewer');
-
-  // Editors and owner see each other's changes because every request reads the current project.
   assert.equal((await owner('GET', `/projects/${pid}`)).data.keywords.length, 2);
 
-  assert.equal((await owner('DELETE', `/projects/${pid}/members/${(await owner('GET', `/projects/${pid}/members`)).data.find(m => m.email === 'vic@agency.test').userId}`)).status, 200);
+  const members = (await owner('GET', `/projects/${pid}/members`)).data;
+  assert.equal((await owner('DELETE', `/projects/${pid}/members/${members.find(m => m.email === 'vic@agency.test').userId}`)).status, 200);
   assert.equal((await viewer('GET', `/projects/${pid}`)).status, 404);
 });
 
-test('search terms report: aggregation, verdicts and winners', async () => {
-  const r = await owner('POST', `/projects/${pid}/searchterms`, { text: REPORT });
+test('each upload is its own file, and daily uploads do not repeat keywords', async () => {
+  const p1 = (await owner('GET', `/projects/${pid}`)).data;
+  assert.equal(p1.batches.length, 1);
+  assert.equal(p1.batches[0].name, 'day-1');
+  assert.equal(p1.batches[0].kind, 'Keyword list');
+
+  const day2 = await owner('POST', `/projects/${pid}/uploads`, { text: 'boiler repair leeds\ncombi boiler installation\nblocked drain leeds', filename: 'day-2.txt' });
+  assert.equal(day2.data.added, 2);
+  assert.equal(day2.data.duplicates, 1, 'the keyword already held on day 1 is not added again');
+  assert.equal(day2.data.project.batches.length, 2);
+
+  const again = await owner('POST', `/projects/${pid}/uploads`, { text: 'boiler repair leeds\ncombi boiler installation' });
+  assert.equal(again.status, 409);
+
+  const only2 = (await owner('GET', `/projects/${pid}/export?type=all&batch=${day2.data.batchId}`)).data;
+  assert.match(only2, /combi boiler installation/);
+  assert.doesNotMatch(only2, /plumber jobs/);
+  const everything = (await owner('GET', `/projects/${pid}/export?type=all`)).data;
+  assert.match(everything, /plumber jobs/);
+  assert.equal((await owner('GET', `/projects/${pid}/export?type=all&batch=nope`)).status, 404);
+
+  const renamed = await owner('PATCH', `/projects/${pid}/uploads/${day2.data.batchId}`, { name: 'Tuesday additions' });
+  assert.equal(renamed.data.batches.find(b => b.id === day2.data.batchId).name, 'Tuesday additions');
+
+  const gone = await owner('DELETE', `/projects/${pid}/uploads/${day2.data.batchId}`);
+  assert.equal(gone.data.batches.length, 1);
+  assert.ok(!gone.data.keywords.some(k => k.keyword === 'combi boiler installation'));
+});
+
+test('a search terms report goes through the same upload, and real results outrank wording', async () => {
+  const r = await owner('POST', `/projects/${pid}/uploads`, { text: REPORT, filename: 'search-terms-march.csv' });
   assert.equal(r.status, 200);
-  const terms = Object.fromEntries(r.data.project.searchTerms.map(t => [t.term, t]));
-  assert.equal(Object.keys(terms).length, 6, 'totals row skipped and duplicates merged');
-  assert.equal(terms['emergency plumber leeds'].clicks, 130);
-  assert.equal(terms['emergency plumber leeds'].cost, 640);
-  assert.equal(terms['emergency plumber leeds'].action, 'ignore');
-  assert.equal(terms['plumber jobs leeds'].action, 'block');
-  assert.equal(terms['plumber jobs leeds'].matchType, 'Negative Phrase');
-  assert.equal(terms['boiler installation cost'].action, 'block', '60 clicks and nothing, on an account converting well');
-  assert.equal(terms['boiler installation cost'].matchType, 'Negative Exact');
-  assert.equal(terms['combi boiler service'].action, 'watch');
-  assert.equal(terms['leak repair leeds'].action, 'add');
-  assert.equal(terms['already blocked thing'].action, 'ignore');
-  const s = r.data.project.stSummary;
-  assert.equal(s.blockCount, 2);
-  assert.equal(s.wasteCost, 312.5);
+  const batch = r.data.project.batches.find(b => b.id === r.data.batchId);
+  assert.equal(batch.kind, 'Search terms report');
+  const kw = Object.fromEntries(r.data.project.keywords.map(k => [k.keyword, k]));
 
-  const csv = (await owner('GET', `/projects/${pid}/export?type=st-negatives&campaign=Search`)).data;
-  assert.match(csv, /Search,plumber jobs leeds,Negative Phrase/);
-  assert.match(csv, /Search,boiler installation cost,Negative Exact/);
-  assert.doesNotMatch(csv, /combi/);
+  assert.equal(kw['emergency plumber leeds'].clicks, 130, 'same term in two campaigns is added up');
+  assert.equal(kw['emergency plumber leeds'].cost, 640);
+  assert.equal(kw['emergency plumber leeds'].category, 'priority');
+  assert.equal(kw['emergency plumber leeds'].reason, 'Converts and is already a keyword');
+  assert.equal(kw['plumber jobs leeds'].category, 'negative');
+  assert.equal(kw['plumber jobs leeds'].reason, 'Job seekers');
+  assert.match(kw['plumber jobs leeds'].note, /4 clicks and 12.5 spent/);
+  assert.equal(kw['boiler installation cost'].category, 'negative', '60 clicks and nothing, on an account that converts well');
+  assert.equal(kw['boiler installation cost'].matchType, 'Negative Exact');
+  assert.notEqual(kw['combi boiler service'].category, 'negative');
+  assert.match(kw['combi boiler service'].note, /needed to judge/);
+  assert.equal(kw['leak repair leeds'].category, 'priority');
+  assert.match(kw['leak repair leeds'].reason, /^Converted/);
+  assert.equal(kw['already blocked thing'].category, 'negative');
+  assert.ok(!kw['Total: Search terms'], 'totals row skipped');
 
-  const bad = await owner('POST', `/projects/${pid}/searchterms`, { text: 'Keyword,Avg. monthly searches\nboiler,100\nradiator,90' });
-  assert.equal(bad.status, 400);
+  const s = r.data.project.perfSummary;
+  assert.equal(s.wasteCount, 3);
+  assert.equal(s.wasteCost, 314.5);
+  assert.equal(s.winners, 2);
 
-  const w = await owner('POST', `/projects/${pid}/searchterms/add-winners`, {});
-  assert.equal(w.data.added, 1);
-  const kw = w.data.project.keywords.find(k => k.keyword === 'leak repair leeds');
-  assert.equal(kw.category, 'priority');
-  assert.equal(kw.conversions, 1);
+  // A report that arrives later brings numbers for a keyword already held
+  const later = await owner('POST', `/projects/${pid}/uploads`, { text: 'Search term,Clicks,Cost,Conv.\nboiler repair leeds,4,9,1\n', filename: 'late.csv' });
+  assert.equal(later.data.updated, 1);
+  assert.equal(later.data.project.keywords.find(k => k.keyword === 'boiler repair leeds').category, 'priority');
 
-  // A manual decision survives re-scoring
-  const t = w.data.project.searchTerms.find(x => x.term === 'combi boiler service');
-  await owner('PATCH', `/projects/${pid}/searchterm/${t.id}`, { action: 'block' });
-  const again = await owner('POST', `/projects/${pid}/classify`, {});
-  assert.equal(again.data.project.searchTerms.find(x => x.term === 'combi boiler service').action, 'block');
+  // A decision made by hand survives later uploads
+  const id = kw['combi boiler service'].id;
+  await owner('PATCH', `/projects/${pid}/keyword/${id}`, { category: 'negative' });
+  const after = await owner('POST', `/projects/${pid}/uploads`, { text: 'radiator flush leeds', filename: 'x.txt' });
+  assert.equal(after.data.project.keywords.find(k => k.id === id).category, 'negative');
+  assert.equal(after.data.project.keywords.find(k => k.id === id).source, 'you');
 });
 
 test('competitors: brands become negatives, headings become gaps', async () => {
@@ -162,10 +191,9 @@ test('competitors: brands become negatives, headings become gaps', async () => {
   assert.equal(r.data.project.competitors.length, 1);
   assert.equal(r.data.failed.length, 1, 'own site is refused');
   assert.equal(r.data.project.competitors[0].name, 'Zenith Heating');
-  const phrases = r.data.project.brands.map(b => b.phrase);
-  assert.ok(phrases.includes('zenith heating'));
+  assert.ok(r.data.project.brands.map(b => b.phrase).includes('zenith heating'));
 
-  const add = await owner('POST', `/projects/${pid}/keywords`, { text: 'zenith boiler cover\nzenith heating reviews\nboiler cover leeds' });
+  const add = await owner('POST', `/projects/${pid}/uploads`, { text: 'zenith boiler cover\nzenith heating reviews\nboiler cover leeds', name: 'Competitor test' });
   const byKw = Object.fromEntries(add.data.project.keywords.map(k => [k.keyword, k]));
   assert.equal(byKw['zenith boiler cover'].category, 'negative');
   assert.match(byKw['zenith boiler cover'].reason, /Competitor brand \(Zenith Heating\)/);
@@ -178,10 +206,29 @@ test('competitors: brands become negatives, headings become gaps', async () => {
   assert.ok(!gaps.includes('our team'));
   assert.ok(!gaps.includes('boiler installation'));
 
-  // Turning a brand off, or the whole setting off, stops the blocking
   const off = await owner('PATCH', `/projects/${pid}/brand`, { phrase: 'zenith heating', enabled: false });
   assert.doesNotMatch(off.data.keywords.find(k => k.keyword === 'zenith heating reviews').reason, /Competitor brand/);
   await owner('PATCH', `/projects/${pid}/brand`, { phrase: 'zenith heating', enabled: true });
   const settings = await owner('PUT', `/projects/${pid}`, { blockCompetitors: false });
   assert.doesNotMatch(settings.data.keywords.find(k => k.keyword === 'zenith boiler cover').reason, /Competitor brand/);
+});
+
+test('projects saved by the earlier version are upgraded into uploads', async () => {
+  const store = require('../lib/db');
+  const old = {
+    id: 'legacy01', name: 'Old', url: '', description: 'Plumber in Leeds', offerings: '', seeds: [], exclude: [], strictness: 'balanced', campaign: '', createdAt: '2026-01-01T00:00:00.000Z',
+    profile: null, keywords: [{ id: 'a1', keyword: 'boiler repair', category: 'relevant' }, { id: 'a2', keyword: 'plumber jobs', category: 'negative', overridden: true }],
+    searchTerms: [{ id: 't1', term: 'drain unblocking', clicks: 5, cost: 10, conversions: 1 }, { id: 't2', term: 'boiler repair', clicks: 2, cost: 3 }],
+  };
+  const me = (await owner('GET', '/projects')).data; assert.ok(me.length);
+  const uid = store.db.prepare('SELECT id FROM users WHERE email = ?').get('olive@agency.test').id;
+  store.create(old, uid);
+  const r = (await owner('GET', '/projects/legacy01')).data;
+  assert.equal(r.batches.length, 2);
+  assert.ok(!('searchTerms' in r));
+  assert.equal(r.keywords.length, 3, 'the repeated term is merged, not duplicated');
+  assert.ok(r.keywords.every(k => r.batches.some(b => b.id === k.batchId)));
+  assert.equal(r.keywords.find(k => k.keyword === 'boiler repair').clicks, 2);
+  const again = (await owner('GET', '/projects/legacy01')).data;
+  assert.deepEqual(again.batches.map(b => b.id), r.batches.map(b => b.id), 'upgrade is saved, ids stay put');
 });

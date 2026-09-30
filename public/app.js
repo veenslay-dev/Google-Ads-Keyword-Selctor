@@ -4,9 +4,15 @@
 const BASE = (document.querySelector('meta[name=base]') || {}).content || '';
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = n => (n == null || n === '' ? '' : Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 }));
 const CATS = [['priority', 'Priority'], ['relevant', 'Relevant'], ['review', 'Review'], ['negative', 'Negative']];
+const CAT_RANK = { priority: 0, relevant: 1, review: 2, negative: 3, undefined: 4 };
 
-const state = { config: { aiEnabled: false, maxKeywords: 1000, maxCompetitors: 3 }, user: null, projects: [], project: null, tab: 'brief', filter: 'all', search: '', sort: { key: 'score', dir: 'desc' }, st: { filter: 'all', search: '', sort: { key: 'cost', dir: 'desc' } } };
+const state = {
+  config: { aiEnabled: false, aiModel: '', maxKeywords: 1000, maxCompetitors: 3 },
+  user: null, projects: [], project: null,
+  view: 'keywords', scope: 'all', filter: 'all', search: '', sort: { key: 'category', dir: 'asc' }, pasteOpen: false,
+};
 
 async function api(path, opts = {}) {
   const res = await fetch(BASE + '/api' + path, {
@@ -29,21 +35,25 @@ function toast(msg, isErr) {
   t.textContent = msg;
   t.className = 'toast show' + (isErr ? ' err' : '');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.className = 'toast'), isErr ? 5000 : 2800);
+  toastTimer = setTimeout(() => (t.className = 'toast'), isErr ? 6000 : 3500);
 }
 
 async function guard(fn) {
   try { return await fn(); } catch (e) { if (!e.auth) toast(e.message, true); }
 }
 
+const viewer = () => state.project && state.project.role === 'viewer';
+const scopeRows = () => (state.scope === 'all' ? state.project.keywords : state.project.keywords.filter(k => k.batchId === state.scope));
+const campaignName = () => state.project.campaign || state.project.name;
+
 /* ---------- sidebar ---------- */
 function renderSide() {
   const ul = $('#projectList');
   if (!state.projects.length) { ul.innerHTML = '<li class="empty">No projects yet.</li>'; return; }
   ul.innerHTML = state.projects.map(p => {
-    const meta = p.total ? `${p.total} kw, ${p.counts.priority} priority` : p.analyzed ? 'analyzed, no keywords' : 'not analyzed';
-    const who = p.role === 'owner' ? (p.shared ? ' \u00b7 shared' : '') : ' \u00b7 ' + p.role + ', ' + p.ownerName;
-    return `<li class="${state.project && state.project.id === p.id ? 'on' : ''}"><button data-id="${p.id}"><span class="pn">${esc(p.name)}</span><span class="pm">${esc(meta + who)}</span></button></li>`;
+    const bits = [p.total ? `${p.total} keywords` : p.analyzed ? 'no keywords yet' : 'not set up'];
+    if (p.role !== 'owner') bits.push(p.role + ', ' + p.ownerName); else if (p.shared) bits.push('shared');
+    return `<li class="${state.project && state.project.id === p.id ? 'on' : ''}"><button data-id="${p.id}"><span class="pn">${esc(p.name)}</span><span class="pm">${esc(bits.join(' · '))}</span></button></li>`;
   }).join('');
 }
 
@@ -52,221 +62,378 @@ async function refreshList() {
   renderSide();
 }
 
-async function openProject(id, tab) {
+async function openProject(id) {
   state.project = await api('/projects/' + id);
-  state.filter = 'all';
-  state.search = '';
-  state.tab = tab || (state.project.keywords.length && state.project.profile ? 'results' : state.project.profile ? 'keywords' : 'brief');
+  state.scope = 'all'; state.filter = 'all'; state.search = '';
+  state.view = state.project.profile ? 'keywords' : 'business';
   renderSide();
   render();
 }
 
-/* ---------- main render ---------- */
+/* ---------- shell ---------- */
 function render() {
   const main = $('#main');
   const p = state.project;
-  if (!p && state.tab !== 'new') {
+  if (!p && state.view !== 'new') {
     main.innerHTML = `<div class="welcome">
-      <h1>Sort a thousand keywords by what you actually sell.</h1>
-      <p class="sub">Tell the tool about your business and website, drop in a keyword sheet from Google Ads, Semrush, Ahrefs or anywhere else, and get back four lists: priority, relevant, review and negative.</p>
-      <ol>
-        <li>Create a project with your website address and a few lines about what you offer.</li>
-        <li>The site is crawled and turned into a profile of your products and wording.</li>
-        <li>Paste or upload up to ${state.config.maxKeywords} keywords.</li>
-        <li>Download CSVs ready for Google Ads Editor, including negatives.</li>
-      </ol>
-      <p><button class="btn primary" id="startNew">Create your first project</button></p></div>`;
+      <h1>Sort your keywords by what you actually sell.</h1>
+      <p class="sub">Tell the tool about your business, then drop in keyword files from Google Ads, Semrush, Ahrefs or anywhere else. Each file becomes its own upload with its own download, so you can add new keywords every day.</p>
+      <button class="btn primary" id="startNew">Create your first project</button></div>`;
     $('#startNew').onclick = startNew;
     return;
   }
-  const title = p ? esc(p.name) : 'New project';
   const link = p && p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a>` : '';
-  const analyzed = Boolean(p && p.profile);
-  const tab = (id, n, label, on, off) => `<button data-tab="${id}" class="${on ? 'on' : ''}" ${off ? 'disabled' : ''}><span class="n">${n}</span>${label}</button>`;
   main.innerHTML = `
     <div class="head">
-      <div><h1>${title}</h1><p class="sub">${link || 'Fill in the brief to get started.'}</p></div>
+      <div><h1>${p ? esc(p.name) : 'New project'}</h1><p class="sub">${link || (p ? 'No website added yet' : 'Start with a few details about the business.')}</p></div>
       ${p ? `<div class="head-actions"><span class="role">${esc(p.role)}</span><button class="btn small" id="share">Share</button></div>` : ''}
     </div>
-    <nav class="steps" aria-label="Project steps">
-      ${tab('brief', 1, 'Brief', state.tab === 'brief' || state.tab === 'new')}
-      ${tab('keywords', 2, 'Keywords' + (p && p.keywords.length ? ' (' + p.keywords.length + ')' : ''), state.tab === 'keywords', !p)}
-      ${tab('terms', 3, 'Search terms' + (p && p.searchTerms.length ? ' (' + p.searchTerms.length + ')' : ''), state.tab === 'terms', !analyzed)}
-      ${tab('competitors', 4, 'Competitors' + (p && p.competitors.length ? ' (' + p.competitors.length + ')' : ''), state.tab === 'competitors', !analyzed)}
-      ${tab('results', 5, 'Results', state.tab === 'results', !(p && p.keywords.length))}
+    <nav class="tabs2" aria-label="Project sections">
+      <button data-view="keywords" class="${state.view === 'keywords' ? 'on' : ''}" ${p ? '' : 'disabled'}>Keywords${p && p.keywords.length ? `<b>${p.keywords.length}</b>` : ''}</button>
+      <button data-view="business" class="${state.view !== 'keywords' ? 'on' : ''}">Business</button>
     </nav>
-    <section id="pane" class="${p && p.role === 'viewer' ? 'ro' : ''}"></section>`;
-  main.querySelectorAll('.steps button').forEach(b => (b.onclick = () => { state.tab = b.dataset.tab; render(); }));
+    <section id="pane" class="${viewer() ? 'ro' : ''}"></section>`;
+  main.querySelectorAll('.tabs2 button').forEach(b => (b.onclick = () => { state.view = b.dataset.view; render(); }));
   const sh = $('#share');
   if (sh) sh.onclick = openShare;
-  if (state.tab === 'brief' || state.tab === 'new') renderBrief(analyzed);
-  else if (state.tab === 'keywords') renderKeywords(analyzed);
-  else if (state.tab === 'terms') renderTerms();
-  else if (state.tab === 'competitors') renderCompetitors();
-  else renderResults();
+  if (state.view === 'keywords') renderKeywords(); else renderBusiness();
   lockIfViewer();
+  pollIfBusy();
 }
 
 // Viewers see everything but change nothing. The server enforces this too.
 function lockIfViewer() {
-  if (!state.project || state.project.role !== 'viewer') return;
+  if (!viewer()) return;
   document.querySelectorAll('#pane textarea, #pane .sel, #pane .ed, #pane #brief input, #pane #brief button').forEach(el => (el.disabled = true));
 }
 
 function startNew() {
-  state.project = null;
-  state.tab = 'new';
-  renderSide();
-  render();
+  state.project = null; state.view = 'new';
+  renderSide(); render();
 }
 
-/* ---------- brief ---------- */
-function renderBrief(analyzed) {
-  const p = state.project || { name: '', url: '', description: '', offerings: '', seeds: [], exclude: [], strictness: 'balanced' };
-  $('#pane').innerHTML = `
-    <form class="form" id="brief" autocomplete="off">
-      <div class="field"><label for="f-name">Project name</label><input type="text" id="f-name" value="${esc(p.name)}" required placeholder="Acme Plumbing, Leeds"></div>
-      <div class="field"><label for="f-url">Website address</label><input type="text" id="f-url" value="${esc(p.url)}" placeholder="acmeplumbing.co.uk"><span class="hint">Up to 8 pages are read, starting from this one.</span></div>
-      <div class="field full"><label for="f-desc">About the business</label><textarea id="f-desc" placeholder="Who you are, where you work, who buys from you.">${esc(p.description)}</textarea></div>
-      <div class="field"><label for="f-off">Products or services</label><textarea id="f-off" placeholder="One per line or comma separated.">${esc(p.offerings)}</textarea></div>
-      <div class="field"><label for="f-seed">Starting keywords</label><textarea id="f-seed" placeholder="emergency plumber leeds&#10;boiler installation">${esc((p.seeds || []).join('\n'))}</textarea><span class="hint">Terms you already know you want to rank for. These count the most.</span></div>
-      <div class="field"><label for="f-ex">Never show for</label><textarea id="f-ex" placeholder="competitor names, products you do not sell">${esc((p.exclude || []).join('\n'))}</textarea><span class="hint">Any keyword containing one of these goes straight to negatives.</span></div>
-      <div class="field"><label>Research keywords ("how to", "what is", courses)</label>
-        <div class="radios">
-          <label><input type="radio" name="strict" value="balanced" ${p.strictness !== 'strict' ? 'checked' : ''}> Put them in Review, they may suit content</label>
-          <label><input type="radio" name="strict" value="strict" ${p.strictness === 'strict' ? 'checked' : ''}> Treat them as negatives</label>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="btn primary" type="submit" id="save">${analyzed ? 'Save and re-analyze' : 'Save and analyze website'}</button>
-        ${p.id && p.role === 'owner' ? '<button class="btn danger" type="button" id="del">Delete project</button>' : ''}
-      </div>
-    </form>
-    ${analyzed ? learnedHtml(p.profile) : ''}`;
-
-  $('#brief').onsubmit = e => {
-    e.preventDefault();
-    const body = {
-      name: $('#f-name').value, url: $('#f-url').value, description: $('#f-desc').value, offerings: $('#f-off').value,
-      seeds: $('#f-seed').value, exclude: $('#f-ex').value, strictness: $('input[name=strict]:checked').value,
-    };
-    const btn = $('#save');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spin"></span>Reading the website...';
-    guard(async () => {
-      try {
-        if (!state.project) { state.project = await api('/projects', { method: 'POST', body }); renderSide(); }
-        state.project = await api('/projects/' + state.project.id + '/analyze', { method: 'POST', body });
-        await refreshList();
-        state.tab = state.project.keywords.length ? 'results' : 'keywords';
-        render();
-        toast('Profile built from ' + (state.project.profile.pages.length || 'your') + ' page(s).');
-      } catch (err) {
-        // The project may exist even if the crawl failed. Keep it so nothing typed is lost.
-        await refreshList();
-        throw err;
-      } finally {
-        const b = $('#save');
-        if (b) { b.disabled = false; b.textContent = analyzed ? 'Save and re-analyze' : 'Save and analyze website'; }
-      }
-    });
-  };
-  const del = $('#del');
-  if (del) del.onclick = () => {
-    if (!confirm('Delete "' + p.name + '" and all its keywords?')) return;
-    guard(async () => {
-      await api('/projects/' + p.id, { method: 'DELETE' });
-      state.project = null; state.tab = 'brief';
-      await refreshList();
-      render();
-    });
-  };
-}
-
-function learnedHtml(pr) {
-  const pages = pr.pages.map(pg => `<li>${esc(pg.url)} <span>(${pg.words} words)</span></li>`).join('');
-  const errs = pr.errors.map(er => `<li class="bad">${esc(er.url)}: ${esc(er.error)}</li>`).join('');
-  return `<div class="learned">
-    <h2>What the tool learned</h2>
-    ${pr.summary ? `<p>${esc(pr.summary)}</p>` : ''}
-    <p class="label">Strongest terms</p>
-    <div class="chips">${pr.topTerms.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>
-    ${pr.topPhrases.length ? `<p class="label">Phrases from your pages</p><div class="chips">${pr.topPhrases.map(t => `<span class="chip ph">${esc(t)}</span>`).join('')}</div>` : ''}
-    ${pr.notOffered.length ? `<p class="label">Looks like you do not sell</p><div class="chips">${pr.notOffered.map(t => `<span class="chip neg">${esc(t)}</span>`).join('')}</div>` : ''}
-    <p class="label">Pages read</p>
-    <ul class="pages">${pages || '<li>None, using only what you typed.</li>'}${errs}</ul>
-    ${pr.aiNote ? `<p class="hint">${esc(pr.aiNote)}</p>` : ''}
-    <p class="sub" style="margin-top:12px">Wrong terms at the top? Add a clearer description or starting keywords and re-analyze.</p>
-  </div>`;
-}
-
-/* ---------- keywords ---------- */
-function renderKeywords(analyzed) {
+/* ---------- keywords view ---------- */
+function renderKeywords() {
   const p = state.project;
-  const max = state.config.maxKeywords;
+  const ai = state.config.aiEnabled;
   $('#pane').innerHTML = `
-    <div class="kw-wrap">
-      <div>
-        <div class="field"><label for="kw-text">Paste keywords</label>
-          <textarea id="kw-text" spellcheck="false" placeholder="One per line, or paste straight from a spreadsheet column."></textarea></div>
-        <div class="counter"><span id="cnt">0 in box</span><span id="room">${p.keywords.length} saved, room for ${Math.max(0, max - p.keywords.length)} more</span></div>
-        <div class="actions" style="grid-column:auto;padding-top:12px">
-          <button class="btn primary ed" id="add">Add keywords</button>
-          ${p.keywords.length ? '<button class="btn danger ed" id="clear">Remove all</button>' : ''}
-        </div>
+    ${p.profile ? '' : `<div class="notice">Tell the tool about the business first so it knows what to look for. You can upload now, and the keywords will be sorted as soon as that is done. <button class="btn link" id="toBusiness">Set up the business</button></div>`}
+    <div class="drop" id="drop">
+      <div class="drop-text">
+        <h2>Add keywords</h2>
+        <p>Drop one or more files here. Google Ads search terms reports, Keyword Planner, Semrush, Ahrefs or a plain list all work. Each file becomes its own upload, so you can add new keywords every day.</p>
+        <p class="aistate ${ai ? 'on' : ''}">${ai ? `AI specialist review is on (${esc(state.config.aiModel)}).` : 'Sorting by built-in rules only. Ask whoever runs this server to add an OpenAI key for the AI specialist review.'}</p>
       </div>
-      <div>
-        <div class="drop" id="drop">
-          <p>Drop a sheet here, or pick a file.<br>CSV, TSV, TXT or XLSX.</p>
-          <input type="file" id="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
-          <button class="btn ed" id="pick">Choose file</button>
-        </div>
-        <div class="aside-note">
-          <p class="label">What gets read</p>
-          <ul>
-            <li>The keyword column is found by its header, so Google Ads, Keyword Planner, Semrush and Ahrefs exports work as they are.</li>
-            <li>Volume, competition, bid, clicks and cost columns are kept when present.</li>
-            <li>Duplicates and <code>[exact]</code> or <code>"phrase"</code> brackets are cleaned up.</li>
-          </ul>
-        </div>
-        ${analyzed ? '' : '<p class="aside-note"><b>Analyze the website first</b> (step 1). Keywords can be added now but they stay unsorted until then.</p>'}
+      <div class="drop-actions">
+        <button class="btn primary ed" id="pick">Choose files</button>
+        <button class="btn ed" id="pasteToggle" aria-expanded="${state.pasteOpen}">Paste keywords</button>
       </div>
-    </div>`;
-  const ta = $('#kw-text');
-  const count = () => {
-    const n = ta.value.split(/\r?\n/).filter(l => l.trim()).length;
-    $('#cnt').innerHTML = `<span class="${n > max ? 'over' : ''}">${n} line${n === 1 ? '' : 's'} in box</span>`;
-  };
-  ta.oninput = count;
-  $('#add').onclick = () => submitKeywords(ta.value, () => { ta.value = ''; count(); });
-  const clear = $('#clear');
-  if (clear) clear.onclick = () => {
-    if (!confirm('Remove all ' + p.keywords.length + ' keywords from this project?')) return;
-    guard(async () => { state.project = await api('/projects/' + p.id + '/keywords', { method: 'DELETE' }); await refreshList(); render(); });
-  };
+      <input type="file" id="file" multiple accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
+    </div>
+    <div class="pastebox" id="pastebox" ${state.pasteOpen ? '' : 'hidden'}>
+      <div class="field"><label for="p-name">Name this upload <span class="hint">(optional)</span></label><input type="text" id="p-name" class="ed" placeholder="Brand terms, 30 Sep"></div>
+      <div class="field"><label for="p-text">Keywords</label><textarea id="p-text" class="ed" spellcheck="false" placeholder="One per line, or paste straight from a spreadsheet column." rows="6"></textarea></div>
+      <div class="actions"><button class="btn primary ed" id="p-add">Add as a new upload</button><span class="hint" id="p-count"></span></div>
+    </div>
+    <div id="files"></div>
+    <div id="results"></div>`;
+
+  const tb = $('#toBusiness');
+  if (tb) tb.onclick = () => { state.view = 'business'; render(); };
   const file = $('#file'), drop = $('#drop');
   $('#pick').onclick = () => file.click();
-  file.onchange = () => file.files[0] && handleFile(file.files[0]);
-  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+  file.onchange = () => { if (file.files.length) uploadFiles([...file.files]); file.value = ''; };
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); if (!viewer()) drop.classList.add('hot'); }));
   ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
-  drop.addEventListener('drop', e => e.dataTransfer.files[0] && handleFile(e.dataTransfer.files[0]));
+  drop.addEventListener('drop', e => { if (!viewer() && e.dataTransfer.files.length) uploadFiles([...e.dataTransfer.files]); });
+  $('#pasteToggle').onclick = () => {
+    state.pasteOpen = !state.pasteOpen;
+    $('#pastebox').hidden = !state.pasteOpen;
+    $('#pasteToggle').setAttribute('aria-expanded', state.pasteOpen);
+    if (state.pasteOpen) $('#p-text').focus();
+  };
+  const ta = $('#p-text');
+  ta.oninput = () => { const n = ta.value.split(/\r?\n/).filter(l => l.trim()).length; $('#p-count').textContent = n ? `${n} line${n === 1 ? '' : 's'}` : ''; };
+  $('#p-add').onclick = () => {
+    if (!ta.value.trim()) return toast('Paste some keywords first.', true);
+    guard(async () => {
+      const text = ta.value, name = $('#p-name').value;
+      const r = await api(`/projects/${p.id}/uploads`, { method: 'POST', body: { text, name } });
+      state.pasteOpen = false;
+      await finishUpload(r.batchId, [uploadMessage(name || 'Pasted keywords', r)], [r]);
+    });
+  };
+  drawFiles();
+  drawResults();
 }
 
-function submitKeywords(text, done) {
-  if (!text.trim()) return toast('Nothing to add yet.', true);
-  return guard(async () => {
-    const r = await api('/projects/' + state.project.id + '/keywords', { method: 'POST', body: { text } });
-    state.project = r.project;
-    await refreshList();
-    let msg = `Added ${r.added} keyword${r.added === 1 ? '' : 's'}.`;
-    if (r.duplicates) msg += ` ${r.duplicates} duplicate or unusable skipped.`;
-    if (r.overLimit) msg += ` ${r.overLimit} left out, the ${state.config.maxKeywords} keyword limit was reached.`;
-    if (done) done();
-    if (r.project.profile) { state.tab = 'results'; render(); } else render();
-    toast(msg + (r.note ? ' ' + r.note : ''));
+function uploadMessage(label, r) {
+  const bits = [];
+  if (r.added) bits.push(`${r.added} new keyword${r.added === 1 ? '' : 's'}`);
+  if (r.updated) bits.push(`results added to ${r.updated} you already had`);
+  if (r.duplicates) bits.push(`${r.duplicates} already in the project, skipped`);
+  if (r.overLimit) bits.push(`${r.overLimit} left out because one upload holds ${state.config.maxKeywords}. Upload them as another file`);
+  return `${label}: ${bits.join(', ') || 'nothing to add'}.`;
+}
+
+async function uploadFiles(files) {
+  const p = state.project;
+  const drop = $('#drop');
+  drop.classList.add('busy');
+  const msgs = [], results = [];
+  let last = null;
+  for (const f of files) {
+    try {
+      const text = await readSheetFile(f);
+      const r = await api(`/projects/${p.id}/uploads`, { method: 'POST', body: { text, filename: f.name } });
+      state.project = r.project; last = r.batchId || last; msgs.push(uploadMessage(f.name, r)); results.push(r);
+    } catch (e) {
+      if (e.auth) return;
+      toast(`${f.name}: ${e.message}`, true);
+    }
+  }
+  drop.classList.remove('busy');
+  if (msgs.length) await finishUpload(last, msgs, results);
+}
+
+async function finishUpload(batchId, msgs) {
+  await refreshList();
+  state.project = await api('/projects/' + state.project.id);
+  if (batchId) { state.scope = batchId; state.filter = 'all'; state.search = ''; }
+  state.view = 'keywords';
+  render();
+  toast(msgs.join(' '));
+}
+
+/* ---------- files ---------- */
+const miniBar = c => {
+  const t = c.total || 1;
+  return `<span class="mbar" aria-hidden="true">${CATS.map(([k]) => `<i class="${k}" style="width:${(c[k] / t) * 100}%"></i>`).join('')}</span>`;
+};
+
+function aiStatus(b) {
+  const a = b.ai || {};
+  if (a.status === 'running') {
+    const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
+    return `<span class="ai running">Checking ${a.done || 0} of ${a.total || 0}</span><span class="prog"><i style="width:${pct}%"></i></span>`;
+  }
+  if (a.status === 'done') return b.stale ? '<span class="ai stale" title="The business details changed after this check. Re-check to use the new details.">AI check out of date</span>' : `<span class="ai ok" title="${esc(a.note || '')}">${a.note ? 'AI checked, some skipped' : 'AI checked'}</span>`;
+  if (a.status === 'error') return `<span class="ai bad" title="${esc(a.note || '')}">AI check failed</span>`;
+  if (a.status === 'interrupted') return '<span class="ai bad" title="The server restarted during the check.">AI check stopped</span>';
+  if (a.status === 'waiting' && state.config.aiEnabled) return '<span class="ai">Waiting for business details</span>';
+  return '<span class="ai muted">Rules only</span>';
+}
+
+function dlHref(type, batch, campaign) {
+  const p = state.project;
+  return `${BASE}/api/projects/${p.id}/export?type=${type}${batch && batch !== 'all' ? '&batch=' + batch : ''}&campaign=${encodeURIComponent(campaign)}`;
+}
+
+function drawFiles() {
+  const p = state.project;
+  const el = $('#files');
+  if (!p.batches.length) { el.innerHTML = ''; return; }
+  const all = p.counts;
+  const rows = [...p.batches].reverse().map(b => {
+    const c = b.counts;
+    const when = new Date(b.createdAt).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    return `<li class="file ${state.scope === b.id ? 'on' : ''}" data-id="${b.id}">
+      <button class="file-main" data-select="${b.id}" aria-pressed="${state.scope === b.id}"><span class="fname">${esc(b.name)}</span><span class="fmeta">${esc(b.kind)} · ${c.total} keyword${c.total === 1 ? '' : 's'} · ${esc(when)}</span></button>
+      <span class="fcounts">${miniBar(c)}<span class="fnums"><b class="priority">${c.priority}</b> <b class="relevant">${c.relevant}</b> <b class="review">${c.review}</b> <b class="negative">${c.negative}</b></span></span>
+      <span class="fstat">${aiStatus(b)}</span>
+      <details class="menu"><summary aria-label="Actions for ${esc(b.name)}">⋯</summary>
+        <div class="menu-pop">
+          <a href="${dlHref('ads-targeting', b.id, campaignName())}">Download keywords to target</a>
+          <a href="${dlHref('ads-negatives', b.id, campaignName())}">Download negative keywords</a>
+          <a href="${dlHref('all', b.id, campaignName())}">Download everything (CSV)</a>
+          <hr>
+          ${state.config.aiEnabled ? `<button class="ed" data-recheck="${b.id}">Re-check with AI</button>` : ''}
+          <button class="ed" data-rename="${b.id}">Rename</button>
+          <button class="ed danger" data-delete="${b.id}">Delete this upload</button>
+        </div></details>
+    </li>`;
+  }).join('');
+  el.innerHTML = `<div class="sect-head"><h2>Your uploads</h2><span class="muted">${p.batches.length} file${p.batches.length === 1 ? '' : 's'}, ${all.total} keywords</span></div>
+    <ul class="files">
+      <li class="file all ${state.scope === 'all' ? 'on' : ''}"><button class="file-main" data-select="all" aria-pressed="${state.scope === 'all'}"><span class="fname">All uploads together</span><span class="fmeta">${all.total} keywords</span></button>
+        <span class="fcounts">${miniBar(all)}<span class="fnums"><b class="priority">${all.priority}</b> <b class="relevant">${all.relevant}</b> <b class="review">${all.review}</b> <b class="negative">${all.negative}</b></span></span><span class="fstat"></span><span></span></li>
+      ${rows}</ul>
+    <p class="legend"><b class="priority">Priority</b> <b class="relevant">Relevant</b> <b class="review">Review</b> <b class="negative">Negative</b></p>`;
+
+  el.querySelectorAll('[data-select]').forEach(b => (b.onclick = () => { state.scope = b.dataset.select; state.filter = 'all'; drawFiles(); drawResults(); }));
+  el.querySelectorAll('[data-rename]').forEach(b => (b.onclick = () => {
+    const batch = p.batches.find(x => x.id === b.dataset.rename);
+    const name = prompt('Name for this upload', batch.name);
+    if (name && name.trim()) guard(async () => { state.project = await api(`/projects/${p.id}/uploads/${batch.id}`, { method: 'PATCH', body: { name } }); drawFiles(); drawResults(); });
+  }));
+  el.querySelectorAll('[data-delete]').forEach(b => (b.onclick = () => {
+    const batch = p.batches.find(x => x.id === b.dataset.delete);
+    if (!confirm(`Delete "${batch.name}" and its ${batch.counts.total} keywords? This cannot be undone.`)) return;
+    guard(async () => {
+      state.project = await api(`/projects/${p.id}/uploads/${batch.id}`, { method: 'DELETE' });
+      if (state.scope === batch.id) state.scope = 'all';
+      await refreshList(); drawFiles(); drawResults();
+    });
+  }));
+  el.querySelectorAll('[data-recheck]').forEach(b => (b.onclick = () => guard(async () => {
+    state.project = await api(`/projects/${p.id}/uploads/${b.dataset.recheck}/recheck`, { method: 'POST' });
+    drawFiles(); pollIfBusy(); toast('The AI specialist is checking this upload again.');
+  })));
+  lockIfViewer();
+}
+
+// Close any open file menu or download panel when clicking elsewhere.
+document.addEventListener('click', e => {
+  document.querySelectorAll('details.menu[open], details.dl[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+});
+
+/* ---------- results ---------- */
+function sortedRows(rows) {
+  const { key, dir } = state.sort;
+  const m = dir === 'asc' ? 1 : -1;
+  return rows.slice().sort((a, b) => {
+    if (key === 'category') return (CAT_RANK[a.category] - CAT_RANK[b.category] || (b.score || 0) - (a.score || 0)) * m;
+    const x = a[key], y = b[key];
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * m;
   });
 }
 
+function drawResults() {
+  const p = state.project;
+  const el = $('#results');
+  if (!p.keywords.length) {
+    el.innerHTML = p.batches.length ? '' : '<div class="empty-state"><b>No keywords yet.</b><br>Add a file or paste a list above and the results appear here.</div>';
+    return;
+  }
+  const base = scopeRows();
+  const batch = state.scope === 'all' ? null : p.batches.find(b => b.id === state.scope);
+  const c = { all: base.length, priority: 0, relevant: 0, review: 0, negative: 0 };
+  base.forEach(k => { if (c[k.category] !== undefined) c[k.category]++; });
+  const q = state.search.trim().toLowerCase();
+  const rows = sortedRows(base.filter(k => (state.filter === 'all' || k.category === state.filter) && (!q || k.keyword.toLowerCase().includes(q))));
+  const has = f => base.some(k => k[f] != null);
+  const metrics = [['volume', 'Searches'], ['clicks', 'Clicks'], ['cost', 'Cost'], ['conversions', 'Conv.']].filter(([f]) => has(f));
+  const showFile = state.scope === 'all' && p.batches.length > 1;
+  const cols = [['keyword', 'Keyword'], ['category', 'Category'], ['confidence', 'Confidence'], ['intent', 'Intent'], ...metrics.map(([f, l]) => [f, l, 1]), ['reason', 'Why']];
+  const bn = new Map(p.batches.map(b => [b.id, b.name]));
+  const ps = p.perfSummary;
+  const campaign = campaignName();
+
+  el.innerHTML = `
+    <div class="sect-head"><h2>${batch ? esc(batch.name) : 'All uploads'}</h2>
+      <details class="dl"><summary class="btn">Download</summary>
+        <div class="dlpanel">
+          <label for="camp">Campaign name for Google Ads Editor</label>
+          <input type="text" id="camp" value="${esc(campaign)}" class="ed">
+          <p class="label">Google Ads Editor</p>
+          <a data-dl="ads-targeting">Keywords to target</a>
+          <a data-dl="ads-negatives">Negative keywords</a>
+          <p class="label">Spreadsheets</p>
+          <a data-dl="priority">Priority only</a><a data-dl="relevant">Relevant only</a><a data-dl="review">Review only</a><a data-dl="negative">Negative only</a><a data-dl="all">Everything</a>
+        </div></details></div>
+    ${ps ? `<p class="perf">From your campaign results: <b>${fmt(ps.totalClicks)}</b> clicks, <b>${fmt(ps.totalCost)}</b> spent, <b>${ps.convRate}%</b> convert${ps.wasteCount ? `. <b class="negative">${fmt(ps.wasteCost)}</b> went on ${ps.wasteCount} keyword${ps.wasteCount === 1 ? '' : 's'} now marked negative` : ''}${ps.winners ? `, and ${ps.winners} converting keyword${ps.winners === 1 ? '' : 's'} are marked priority` : ''}.</p>` : ''}
+    <div class="bar" role="img" aria-label="Split by category">${CATS.map(([k]) => `<i class="${k}" style="width:${(c[k] / (c.all || 1)) * 100}%"></i>`).join('')}</div>
+    <div class="tools">
+      <div class="tabs">${[['all', 'All'], ...CATS].map(([k, l]) => `<button data-f="${k}" class="${state.filter === k ? 'on' : ''}">${k === 'all' ? '' : `<span class="dot" style="background:var(--${k})"></span>`}${l}<b>${c[k]}</b></button>`).join('')}</div>
+      <span class="grow"></span>
+      <input type="text" class="search" id="search" placeholder="Search keywords" value="${esc(state.search)}" aria-label="Search keywords">
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr>${cols.map(([k, l, n]) => `<th data-k="${k}" class="${n ? 'num' : ''}" ${state.sort.key === k ? `data-dir="${state.sort.dir}"` : ''}>${l}</th>`).join('')}<th></th></tr></thead>
+      <tbody id="rows"></tbody></table></div>
+    <details class="extras"><summary>Suggested account-level negative words</summary>
+      <p class="sub">Words that keep turning up in your negatives and never in your site. Good candidates for a shared negative list.</p>
+      <div class="chips">${(p.negativeWords || []).map(w => `<span class="chip neg">${esc(w.word)}<small>${w.count}</small></span>`).join('') || '<span class="sub">Nothing repeats yet.</span>'}</div>
+      ${(p.negativeWords || []).length ? '<p><a class="btn small" data-dl="negative-words">Download as a negative list</a></p>' : ''}
+    </details>
+    <details class="extras"><summary>Ad group ideas</summary>
+      <p class="sub">Priority and relevant keywords grouped by their strongest shared term. A starting point, not a final structure.</p>
+      ${(p.adGroups || []).map(g => `<details class="ag"><summary>${esc(g.name)}<span>${g.ids.length}</span></summary><div>${g.ids.map(id => esc((p.keywords.find(k => k.id === id) || {}).keyword)).join(', ')}</div></details>`).join('') || '<span class="sub">No priority or relevant keywords yet.</span>'}
+    </details>`;
+
+  const setLinks = () => el.querySelectorAll('[data-dl]').forEach(a => (a.href = dlHref(a.dataset.dl, state.scope, $('#camp') ? $('#camp').value : campaign)));
+  setLinks();
+  $('#camp').oninput = setLinks;
+  $('#camp').onchange = e => guard(() => api('/projects/' + p.id, { method: 'PUT', body: { campaign: e.target.value } }));
+
+  const body = $('#rows');
+  const colCount = cols.length + 1;
+  const tag = k => (showFile ? `<span class="ftag">${esc(bn.get(k.batchId) || '')}</span>` : '');
+  body.innerHTML = rows.length ? rows.slice(0, 1500).map(k => `<tr data-id="${k.id}">
+      <td class="kw">${esc(k.keyword)}${tag(k)}</td>
+      <td>${k.category ? `<select class="sel ${k.category}" aria-label="Category for ${esc(k.keyword)}">${CATS.map(([v, l]) => `<option value="${v}" ${k.category === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : '<span class="mt">unsorted</span>'}</td>
+      <td>${confCell(k)}</td>
+      <td class="intent">${esc(k.intent || '')}</td>
+      ${metrics.map(([f]) => `<td class="num">${fmt(k[f])}</td>`).join('')}
+      <td class="why" title="${esc([k.reason, k.note].filter(Boolean).join('. '))}">${esc(k.reason || '')}${k.note ? `<span class="note">${esc(k.note)}</span>` : ''}</td>
+      <td><button class="x ed" title="Remove keyword" aria-label="Remove ${esc(k.keyword)}">&times;</button></td></tr>`).join('') +
+    (rows.length > 1500 ? `<tr><td colspan="${colCount}" class="empty-state">Showing the first 1500 of ${rows.length}. Use the filters to narrow it down.</td></tr>` : '')
+    : `<tr><td colspan="${colCount}" class="empty-state">Nothing matches this filter.</td></tr>`;
+
+  el.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => { state.filter = b.dataset.f; drawResults(); }));
+  el.querySelectorAll('th[data-k]').forEach(th => (th.onclick = () => {
+    const k = th.dataset.k;
+    state.sort = { key: k, dir: state.sort.key === k && state.sort.dir === 'asc' ? 'desc' : 'asc' };
+    drawResults();
+  }));
+  $('#search').oninput = e => {
+    state.search = e.target.value;
+    const pos = e.target.selectionStart;
+    drawResults();
+    const s = $('#search'); s.focus(); s.setSelectionRange(pos, pos);
+  };
+  body.querySelectorAll('select').forEach(sel => (sel.onchange = () => guard(async () => {
+    state.project = await api(`/projects/${p.id}/keyword/${sel.closest('tr').dataset.id}`, { method: 'PATCH', body: { category: sel.value } });
+    await refreshList(); drawFiles(); drawResults();
+  })));
+  body.querySelectorAll('.x').forEach(btn => (btn.onclick = () => guard(async () => {
+    state.project = await api(`/projects/${p.id}/keyword/${btn.closest('tr').dataset.id}`, { method: 'DELETE' });
+    await refreshList(); drawFiles(); drawResults();
+  })));
+  lockIfViewer();
+}
+
+function confCell(k) {
+  if (k.source === 'ai' && k.confidence != null) {
+    const cls = k.confidence >= 85 ? 'hi' : k.confidence >= 65 ? 'mid' : 'lo';
+    return `<span class="conf ${cls}" title="${k.confidence}% sure"><i style="width:${k.confidence}%"></i></span><span class="confn">${k.confidence}%</span>`;
+  }
+  const label = { you: 'you decided', performance: 'campaign data', rules: 'rules' }[k.source] || '';
+  return `<span class="mt">${label}</span>`;
+}
+
+/* ---------- progress while the AI works ---------- */
+let pollTimer = null;
+function pollIfBusy() {
+  clearTimeout(pollTimer);
+  const p = state.project;
+  if (!p || !p.batches.some(b => b.ai && b.ai.status === 'running')) return;
+  pollTimer = setTimeout(async () => {
+    try {
+      const s = await api(`/projects/${p.id}/status`);
+      if (!state.project || state.project.id !== p.id) return;
+      const done = [];
+      for (const sb of s.batches) {
+        const b = state.project.batches.find(x => x.id === sb.id);
+        if (!b) continue;
+        if (b.ai.status === 'running' && sb.ai.status !== 'running') done.push({ name: b.name, ai: sb.ai });
+        b.ai = sb.ai; b.counts = sb.counts;
+      }
+      if (done.length) {
+        state.project = await api('/projects/' + p.id);
+        await refreshList();
+        if (state.view === 'keywords') { drawFiles(); drawResults(); }
+        for (const d of done) toast(d.ai.status === 'error' ? `AI check of "${d.name}" failed: ${d.ai.note}` : `The AI specialist finished "${d.name}".` + (d.ai.note ? ' ' + d.ai.note : ''), d.ai.status === 'error');
+      } else if (state.view === 'keywords') drawFiles();
+    } catch (e) { /* try again on the next tick */ }
+    pollIfBusy();
+  }, 1500);
+}
+
+/* ---------- reading files ---------- */
 function decodeBuffer(buf) {
   const u = new Uint8Array(buf);
   if (u[0] === 0xff && u[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf);
@@ -285,157 +452,155 @@ function loadXlsx() {
   });
 }
 
-function handleFile(f) {
-  guard(async () => {
-    if (f.size > 5 * 1024 * 1024) throw new Error('That file is over 5 MB. Trim it to the keyword columns first.');
-    const buf = await f.arrayBuffer();
-    let text;
-    if (/\.xlsx?$/i.test(f.name)) {
-      const X = await loadXlsx();
-      const wb = X.read(buf, { type: 'array' });
-      text = X.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]);
-    } else text = decodeBuffer(buf);
-    await submitKeywords(text);
-  });
-}
-
-/* ---------- results ---------- */
-function visibleRows() {
-  const p = state.project;
-  const q = state.search.trim().toLowerCase();
-  let rows = p.keywords.filter(k => (state.filter === 'all' || k.category === state.filter) && (!q || k.keyword.toLowerCase().includes(q)));
-  const { key, dir } = state.sort;
-  const m = dir === 'asc' ? 1 : -1;
-  rows = rows.slice().sort((a, b) => {
-    const x = a[key], y = b[key];
-    if (x == null && y == null) return 0;
-    if (x == null) return 1;
-    if (y == null) return -1;
-    return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * m;
-  });
-  return rows;
-}
-
-function renderResults() {
-  const p = state.project;
-  if (!p.profile) {
-    $('#pane').innerHTML = '<div class="empty-state">Analyze the website in step 1 to sort these keywords.</div>';
-    return;
+async function readSheetFile(f) {
+  if (f.size > 8 * 1024 * 1024) throw new Error('That file is over 8 MB. Filter the report to fewer days or one campaign.');
+  const buf = await f.arrayBuffer();
+  if (/\.xlsx?$/i.test(f.name)) {
+    const X = await loadXlsx();
+    const wb = X.read(buf, { type: 'array' });
+    return X.utils.sheet_to_csv(wb.Sheets[wb.SheetNames[0]]);
   }
-  const c = p.counts, total = p.keywords.length || 1;
-  const bar = CATS.map(([k]) => `<i class="${k}" style="width:${(c[k] / total) * 100}%"></i>`).join('');
-  const tabs = [['all', 'All', p.keywords.length], ...CATS.map(([k, l]) => [k, l, c[k]])].map(([k, l, n]) =>
-    `<button data-f="${k}" class="${state.filter === k ? 'on' : ''}">${k === 'all' ? '' : `<span class="dot" style="background:var(--${k})"></span>`}${l}<b>${n}</b></button>`).join('');
-  const q = encodeURIComponent(p.campaign || p.name);
+  return decodeBuffer(buf);
+}
 
+/* ---------- business view ---------- */
+function renderBusiness() {
+  const p = state.project || { name: '', url: '', description: '', offerings: '', serviceArea: '', seeds: [], exclude: [], strictness: 'balanced', competitors: [], brands: [] };
+  const analyzed = Boolean(p.profile);
   $('#pane').innerHTML = `
-    <div class="bar" role="img" aria-label="Category split">${bar}</div>
-    <div class="tools">
-      <div class="tabs">${tabs}</div><span class="grow"></span>
-      <input type="text" class="search" id="search" placeholder="Filter keywords" value="${esc(state.search)}" aria-label="Filter keywords">
-      ${state.config.aiEnabled ? '<button class="btn small ed" id="ai">Ask AI about borderline ones</button>' : ''}
-      <button class="btn small ed" id="reset" title="Discard your manual changes and score again">Re-score</button>
-    </div>
-    <div class="exports">
-      <span class="label">Download</span>
-      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=all">Everything</a>
-      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=priority">Priority</a>
-      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=negative">Negative</a>
-      <span class="grow"></span>
-      <span class="label">Google Ads Editor</span>
-      <input type="text" id="camp" value="${esc(p.campaign || p.name)}" aria-label="Campaign name">
-      <a class="btn small" id="dl-t" href="${BASE}/api/projects/${p.id}/export?type=ads-targeting&campaign=${q}">Search targeting</a>
-      <a class="btn small" id="dl-n" href="${BASE}/api/projects/${p.id}/export?type=ads-negatives&campaign=${q}">Negatives</a>
-    </div>
-    <div class="tablewrap"><table>
-      <thead><tr>${[['keyword', 'Keyword'], ['category', 'Category'], ['score', 'Score', 1], ['intent', 'Intent'], ['volume', 'Searches', 1], ['bid', 'Bid', 1], ['matchType', 'Match type'], ['reason', 'Why']]
-        .map(([k, l, n]) => `<th data-k="${k}" class="${n ? 'num' : ''}" ${state.sort.key === k ? `data-dir="${state.sort.dir}"` : ''}>${l}</th>`).join('')}<th></th></tr></thead>
-      <tbody id="rows"></tbody></table></div>
-    <div class="twocol">
-      <div><h2>Account-level negative words</h2>
-        <p class="sub" style="margin-bottom:10px">Words that keep turning up in your negatives and never in your site. Good candidates for a shared negative list.</p>
-        <div class="chips">${(p.negativeWords || []).map(w => `<span class="chip neg">${esc(w.word)}<small>${w.count}</small></span>`).join('') || '<span class="sub">Nothing repeats yet.</span>'}</div>
-        ${(p.negativeWords || []).length ? `<p><a class="btn small" style="text-decoration:none;color:inherit" href="${BASE}/api/projects/${p.id}/export?type=negative-words&campaign=${q}">Download as negative list</a></p>` : ''}
+    <form class="form" id="brief" autocomplete="off">
+      <div class="field"><label for="f-name">Project name</label><input type="text" id="f-name" value="${esc(p.name)}" required placeholder="Dinesh Aarjav, NRI tax"></div>
+      <div class="field"><label for="f-url">Website</label><input type="text" id="f-url" value="${esc(p.url)}" placeholder="example.com"><span class="hint">Up to 8 pages are read, starting from this one.</span></div>
+      <div class="field full"><label for="f-desc">About the business</label><textarea id="f-desc" placeholder="Who you are, who buys from you, what makes you different.">${esc(p.description)}</textarea></div>
+      <div class="field"><label for="f-off">Products or services</label><textarea id="f-off" placeholder="One per line or separated by commas.">${esc(p.offerings)}</textarea></div>
+      <div class="field"><label for="f-area">Where you work</label><textarea id="f-area" placeholder="Cities, countries, or online only. Searches for places you do not serve are treated as waste.">${esc(p.serviceArea || '')}</textarea></div>
+      <div class="field"><label for="f-seed">Keywords you already want</label><textarea id="f-seed" placeholder="nri tax consultant&#10;nri itr filing">${esc((p.seeds || []).join('\n'))}</textarea><span class="hint">These count the most.</span></div>
+      <div class="field"><label for="f-ex">Never show for</label><textarea id="f-ex" placeholder="Competitor names, services you do not offer">${esc((p.exclude || []).join('\n'))}</textarea><span class="hint">A keyword containing any of these goes straight to Negative.</span></div>
+      <div class="field full"><label>Research-style searches ("how to", "what is", courses)</label>
+        <div class="radios">
+          <label><input type="radio" name="strict" value="balanced" ${p.strictness !== 'strict' ? 'checked' : ''}> Judge them on their merits</label>
+          <label><input type="radio" name="strict" value="strict" ${p.strictness === 'strict' ? 'checked' : ''}> Treat them as negatives</label>
+        </div></div>
+      <div class="actions">
+        <button class="btn primary" type="submit" id="save">${analyzed ? 'Save and re-read the website' : 'Save and read the website'}</button>
+        ${analyzed ? '<button class="btn" type="button" id="saveOnly">Save without re-reading</button>' : ''}
+        ${p.id && p.role === 'owner' ? '<span class="grow"></span><button class="btn danger" type="button" id="del">Delete project</button>' : ''}
       </div>
-      <div><h2>Ad group ideas</h2>
-        <p class="sub" style="margin-bottom:10px">Priority and relevant keywords grouped by their strongest shared term. A starting point, not a final structure.</p>
-        ${(p.adGroups || []).map(g => `<details class="ag"><summary>${esc(g.name)}<span>${g.ids.length}</span></summary><div>${g.ids.map(id => esc((p.keywords.find(k => k.id === id) || {}).keyword)).join(', ')}</div></details>`).join('') || '<span class="sub">No priority or relevant keywords yet.</span>'}
-      </div>
-    </div>`;
+    </form>
+    ${analyzed ? learnedHtml(p.profile) : ''}
+    ${p.id ? competitorsHtml(p) : ''}`;
 
-  drawRows();
-  document.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => { state.filter = b.dataset.f; renderResults(); }));
-  document.querySelectorAll('th[data-k]').forEach(th => (th.onclick = () => {
-    const k = th.dataset.k;
-    state.sort = { key: k, dir: state.sort.key === k && state.sort.dir === 'desc' ? 'asc' : 'desc' };
-    renderResults();
-  }));
-  $('#search').oninput = e => { state.search = e.target.value; drawRows(); };
-  $('#camp').oninput = e => {
-    const v = encodeURIComponent(e.target.value);
-    $('#dl-t').href = `${BASE}/api/projects/${p.id}/export?type=ads-targeting&campaign=${v}`;
-    $('#dl-n').href = `${BASE}/api/projects/${p.id}/export?type=ads-negatives&campaign=${v}`;
-  };
-  $('#camp').onchange = e => guard(() => api('/projects/' + p.id, { method: 'PUT', body: { campaign: e.target.value } }));
-  $('#reset').onclick = () => guard(async () => {
-    const r = await api('/projects/' + p.id + '/classify', { method: 'POST', body: { reset: true } });
-    state.project = r.project; await refreshList(); renderResults(); toast('Scored again.');
+  const body = () => ({
+    name: $('#f-name').value, url: $('#f-url').value, description: $('#f-desc').value, offerings: $('#f-off').value, serviceArea: $('#f-area').value,
+    seeds: $('#f-seed').value, exclude: $('#f-ex').value, strictness: $('input[name=strict]:checked').value,
   });
-  const ai = $('#ai');
-  if (ai) ai.onclick = () => {
-    ai.disabled = true; ai.innerHTML = '<span class="spin"></span>Asking...';
+  $('#brief').onsubmit = e => {
+    e.preventDefault();
+    const btn = $('#save');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span>Reading the website...';
     guard(async () => {
       try {
-        const r = await api('/projects/' + p.id + '/classify', { method: 'POST', body: { useAI: true } });
-        state.project = r.project; await refreshList(); renderResults(); toast(r.note || 'Done.');
-      } finally { if ($('#ai')) { $('#ai').disabled = false; $('#ai').textContent = 'Ask AI about borderline ones'; } }
+        if (!state.project) { state.project = await api('/projects', { method: 'POST', body: body() }); renderSide(); }
+        state.project = await api('/projects/' + state.project.id + '/analyze', { method: 'POST', body: body() });
+        await refreshList();
+        state.view = 'keywords'; state.scope = 'all';
+        render();
+        toast('The business is set up. Now add your keywords.');
+      } catch (err) { await refreshList(); throw err; }
+      finally { const b = $('#save'); if (b) { b.disabled = false; b.textContent = analyzed ? 'Save and re-read the website' : 'Save and read the website'; } }
+    });
+  };
+  const so = $('#saveOnly');
+  if (so) so.onclick = () => guard(async () => {
+    state.project = await api('/projects/' + state.project.id, { method: 'PUT', body: body() });
+    await refreshList(); renderBusiness(); lockIfViewer(); toast('Saved. Exclusions and strictness were applied to your keywords.');
+  });
+  const del = $('#del');
+  if (del) del.onclick = () => {
+    if (!confirm(`Delete "${p.name}" with all its uploads and keywords? This cannot be undone.`)) return;
+    guard(async () => { await api('/projects/' + p.id, { method: 'DELETE' }); state.project = null; state.view = 'keywords'; await refreshList(); render(); });
+  };
+  if (p.id) wireCompetitors();
+}
+
+function learnedHtml(pr) {
+  const pages = pr.pages.map(pg => `<li>${esc(pg.url)} <span>(${pg.words} words)</span></li>`).join('');
+  const errs = pr.errors.map(er => `<li class="bad">${esc(er.url)}: ${esc(er.error)}</li>`).join('');
+  return `<div class="learned">
+    <h2>What the tool learned</h2>
+    ${pr.summary ? `<p>${esc(pr.summary)}</p>` : ''}
+    <p class="label">Strongest terms</p>
+    <div class="chips">${pr.topTerms.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>
+    ${pr.topPhrases.length ? `<p class="label">Phrases from your pages</p><div class="chips">${pr.topPhrases.map(t => `<span class="chip ph">${esc(t)}</span>`).join('')}</div>` : ''}
+    ${pr.notOffered.length ? `<p class="label">Looks like you do not sell</p><div class="chips">${pr.notOffered.map(t => `<span class="chip neg">${esc(t)}</span>`).join('')}</div>` : ''}
+    <details class="extras"><summary>Pages read (${pr.pages.length})</summary><ul class="pages">${pages || '<li>None, using only what you typed.</li>'}${errs}</ul></details>
+    ${pr.aiNote ? `<p class="hint">${esc(pr.aiNote)}</p>` : ''}
+    <p class="hint">Wrong terms at the top? Write a clearer description or add the keywords you want, then read the website again.</p>
+  </div>`;
+}
+
+/* ---------- competitors ---------- */
+function competitorsHtml(p) {
+  const comps = p.competitors.map(c => `<li>
+      <span><b>${esc(c.name)}</b> <span class="pm">${esc(c.host)}</span><br><span class="pm">${c.pages.length} page${c.pages.length === 1 ? '' : 's'} read${c.errors.length ? ', ' + c.errors.length + ' failed' : ''}</span></span>
+      <button class="x ed" data-rm="${c.id}" aria-label="Remove ${esc(c.name)}">&times;</button></li>`).join('');
+  const brands = p.brands.map(b => `<button class="chip brand ${b.enabled ? '' : 'off'} ed" data-b="${esc(b.phrase)}" aria-pressed="${b.enabled}" title="${esc('From ' + b.competitor + '. Click to ' + (b.enabled ? 'stop blocking' : 'block again'))}">${esc(b.phrase)}</button>`).join('');
+  const gaps = (p.gaps || []).map((g, i) => `<li><label><input type="checkbox" class="ed" data-i="${i}"> <b>${esc(g.phrase)}</b></label> <span class="pm">${g.competitors.map(esc).join(', ')}</span></li>`).join('');
+  return `<div class="competitors" id="competitors">
+    <h2>Competitors</h2>
+    <p class="sub">Optional. Their brand names can be blocked as negatives, and their headings show topics your site may be missing.</p>
+    <div class="kw-wrap">
+      <div>
+        <div class="field"><label for="c-urls">Competitor websites</label>
+          <textarea id="c-urls" class="ed" style="min-height:92px" placeholder="competitor-one.com&#10;competitor-two.com" spellcheck="false">${esc(p.competitors.map(c => c.url).join('\n'))}</textarea>
+          <span class="hint">Up to ${state.config.maxCompetitors}, one per line. About 5 pages are read from each.</span></div>
+        <div class="actions" style="padding-top:10px"><button class="btn ed" id="c-go">${p.competitors.length ? 'Read them again' : 'Read competitor sites'}</button></div>
+      </div>
+      <div>${p.competitors.length ? `<ul class="members">${comps}</ul>` : ''}</div>
+    </div>
+    ${p.competitors.length ? `<div class="twocol">
+      <div><h3>Brand names</h3>
+        <label class="check"><input type="checkbox" id="c-block" class="ed" ${p.blockCompetitors ? 'checked' : ''}> Send searches containing these names to Negative</label>
+        <div class="chips" style="margin-top:10px">${brands || '<span class="sub">No usable brand names found.</span>'}</div>
+        <p class="hint">Only names with a word that is not in your own vocabulary count. Click a name to switch it off. Leave this off if you plan to bid on competitor names on purpose.</p></div>
+      <div><h3>Topics they cover that you do not</h3>
+        ${gaps ? `<ul class="gaps">${gaps}</ul><p><button class="btn small primary ed" id="c-add">Add selected as a new upload</button></p>` : '<span class="sub">Nothing stands out. Try a competitor with a larger site.</span>'}</div>
+    </div>` : ''}
+  </div>`;
+}
+
+function wireCompetitors() {
+  const p = state.project;
+  const pane = $('#pane');
+  $('#c-go').onclick = () => {
+    const btn = $('#c-go');
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Reading sites...';
+    guard(async () => {
+      try {
+        const r = await api(`/projects/${p.id}/competitors`, { method: 'POST', body: { urls: $('#c-urls').value } });
+        state.project = r.project; await refreshList(); renderBusiness(); lockIfViewer();
+        $('#competitors').scrollIntoView({ behavior: 'smooth' });
+        if (r.failed.length) toast('Could not use: ' + r.failed.map(f => f.url + ' (' + f.error + ')').join('; '), true);
+        else toast('Read ' + r.project.competitors.length + ' competitor site(s).');
+      } finally { const b = $('#c-go'); if (b) { b.disabled = false; b.textContent = 'Read competitor sites'; } }
+    });
+  };
+  pane.querySelectorAll('[data-rm]').forEach(b => (b.onclick = () => guard(async () => { state.project = await api(`/projects/${p.id}/competitors/${b.dataset.rm}`, { method: 'DELETE' }); await refreshList(); renderBusiness(); lockIfViewer(); })));
+  pane.querySelectorAll('[data-b]').forEach(b => (b.onclick = () => guard(async () => {
+    state.project = await api(`/projects/${p.id}/brand`, { method: 'PATCH', body: { phrase: b.dataset.b, enabled: b.getAttribute('aria-pressed') !== 'true' } });
+    await refreshList(); renderBusiness(); lockIfViewer();
+  })));
+  const blk = $('#c-block');
+  if (blk) blk.onchange = () => guard(async () => { state.project = await api('/projects/' + p.id, { method: 'PUT', body: { blockCompetitors: blk.checked } }); await refreshList(); renderBusiness(); lockIfViewer(); });
+  const add = $('#c-add');
+  if (add) add.onclick = () => {
+    const picked = [...pane.querySelectorAll('.gaps input:checked')].map(i => p.gaps[Number(i.dataset.i)].phrase);
+    if (!picked.length) return toast('Tick the topics you want first.', true);
+    guard(async () => {
+      const r = await api(`/projects/${p.id}/uploads`, { method: 'POST', body: { text: picked.join('\n'), name: 'Competitor topics' } });
+      state.project = r.project;
+      await finishUpload(r.batchId, [uploadMessage('Competitor topics', r)]);
     });
   };
 }
-
-function drawRows() {
-  const p = state.project;
-  const rows = visibleRows();
-  const body = $('#rows');
-  if (!rows.length) { body.innerHTML = '<tr><td colspan="9" class="empty-state">Nothing matches this filter.</td></tr>'; return; }
-  body.innerHTML = rows.map(k => `<tr data-id="${k.id}">
-    <td class="kw">${esc(k.keyword)}</td>
-    <td>${k.category ? `<select class="sel ${k.category}" aria-label="Category for ${esc(k.keyword)}">${CATS.map(([v, l]) => `<option value="${v}" ${k.category === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : '<span class="mt">unsorted</span>'}</td>
-    <td class="num"><span class="sc">${k.score ?? ''}</span></td>
-    <td>${esc(k.intent || '')}</td>
-    <td class="num">${k.volume != null ? k.volume.toLocaleString() : ''}</td>
-    <td class="num">${k.bid != null ? k.bid : ''}</td>
-    <td><span class="mt">${esc(k.matchType || '')}</span></td>
-    <td class="why">${esc(k.reason || '')}</td>
-    <td><button class="x" title="Remove keyword" aria-label="Remove ${esc(k.keyword)}">&times;</button></td></tr>`).join('');
-  body.querySelectorAll('select').forEach(sel => (sel.onchange = () => {
-    const id = sel.closest('tr').dataset.id;
-    guard(async () => {
-      state.project = await api(`/projects/${p.id}/keyword/${id}`, { method: 'PATCH', body: { category: sel.value } });
-      await refreshList(); renderResults();
-    });
-  }));
-  body.querySelectorAll('.x').forEach(btn => (btn.onclick = () => {
-    const id = btn.closest('tr').dataset.id;
-    guard(async () => {
-      state.project = await api(`/projects/${p.id}/keyword/${id}`, { method: 'DELETE' });
-      await refreshList(); state.project.keywords.length ? renderResults() : render();
-    });
-  }));
-}
-
-/* ---------- boot ---------- */
-$('#projectList').onclick = e => {
-  const b = e.target.closest('button[data-id]');
-  if (b) guard(() => openProject(b.dataset.id));
-};
-$('#newProject').onclick = startNew;
-$('#signout').onclick = () => signOut();
-$('#home').onclick = e => { e.preventDefault(); state.project = null; state.tab = 'brief'; renderSide(); render(); };
-
-guard(async () => {
-  state.config = await api('/config');
-  $('#engine').innerHTML = state.config.aiEnabled ? '<b>AI review on</b>' : 'Offline scoring';
-  const me = await api('/auth/me');
-  if (me.user) await startApp(me.user); else showAuth();
-});

@@ -5,11 +5,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./lib/db');
 const auth = require('./lib/auth');
-const ai = require('./lib/ai');
+const openai = require('./lib/openai');
+const pipeline = require('./lib/pipeline');
+const { matchFor, hasPerf } = require('./lib/performance');
 const { crawlSite } = require('./lib/crawler');
 const { buildProfile, splitList } = require('./lib/profile');
-const { classifyAll, classifyOne, buildOpts, suggestNegativeWords, suggestAdGroups } = require('./lib/classifier');
-const { analyzeTerms, ACTIONS } = require('./lib/searchterms');
+const { suggestNegativeWords, suggestAdGroups } = require('./lib/classifier');
 const { crawlCompetitor, findGaps, MAX_COMPETITORS } = require('./lib/competitors');
 const { extractKeywords, MAX_KEYWORDS } = require('./lib/sheet');
 const { toCsv } = require('./lib/csv');
@@ -22,7 +23,7 @@ const PUBLIC = path.join(__dirname, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const CATEGORIES = ['priority', 'relevant', 'review', 'negative'];
 const RANK = { viewer: 1, editor: 2, owner: 3 };
-const MAX_TERMS = 5000;
+const MAX_PROJECT_KEYWORDS = 20000;
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'same-origin',
@@ -64,6 +65,7 @@ function applyFields(p, b) {
   if (b.url !== undefined) p.url = normalizeUrl(b.url);
   if (b.description !== undefined) p.description = String(b.description).slice(0, 4000);
   if (b.offerings !== undefined) p.offerings = String(b.offerings).slice(0, 4000);
+  if (b.serviceArea !== undefined) p.serviceArea = String(b.serviceArea).slice(0, 500);
   if (b.seeds !== undefined) p.seeds = splitList(b.seeds).slice(0, 50);
   if (b.exclude !== undefined) p.exclude = splitList(b.exclude).slice(0, 100);
   if (b.strictness !== undefined) p.strictness = b.strictness === 'strict' ? 'strict' : 'balanced';
@@ -71,26 +73,29 @@ function applyFields(p, b) {
   if (b.campaign !== undefined) p.campaign = String(b.campaign).slice(0, 100);
 }
 
-const matchFor = (k, cat) => cat === 'negative' ? (k.keyword.includes(' ') ? 'Negative Phrase' : 'Negative Broad')
-  : cat === 'priority' ? (k.keyword.split(' ').length >= 3 ? 'Exact' : 'Phrase') : cat === 'relevant' ? 'Phrase' : '';
+const countsOf = rows => {
+  const c = { priority: 0, relevant: 0, review: 0, negative: 0, unsorted: 0, total: rows.length };
+  for (const k of rows) c[k.category || 'unsorted']++;
+  return c;
+};
 
 function summary(p, role, ownerName, memberCount) {
-  const counts = { priority: 0, relevant: 0, review: 0, negative: 0, unsorted: 0 };
-  for (const k of p.keywords) counts[k.category || 'unsorted']++;
-  return { id: p.id, name: p.name, url: p.url, updatedAt: p.updatedAt, analyzed: Boolean(p.profile), total: p.keywords.length, counts, role, ownerName, shared: memberCount > 1 };
+  const c = countsOf(p.keywords);
+  return { id: p.id, name: p.name, url: p.url, updatedAt: p.updatedAt, analyzed: Boolean(p.profile), total: c.total, counts: c, uploads: (p.batches || []).length, role, ownerName, shared: memberCount > 1 };
 }
 
 // The full profile weight tables are large and only useful server side.
 function publicProject(p, role) {
   const { profile, competitors = [], ...rest } = p;
-  const view = { ...rest, role, counts: summary(p).counts, searchTerms: p.searchTerms || [], stSummary: p.stSummary || null };
+  const view = { ...rest, role, counts: countsOf(p.keywords), perfSummary: p.perfSummary || null };
+  view.batches = p.batches.map(b => ({ ...b, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)), stale: Boolean(profile && b.ai && b.ai.status === 'done' && b.ai.profileAt !== profile.builtAt) }));
   view.competitors = competitors.map(c => ({ id: c.id, url: c.url, name: c.name, host: c.host, pages: c.pages, errors: c.errors, crawledAt: c.crawledAt }));
   view.brands = p.competitorBrands || [];
   view.blockCompetitors = p.blockCompetitors !== false;
   if (profile) {
     view.profile = {
       builtAt: profile.builtAt, summary: profile.summary || '', topTerms: profile.topTerms, topPhrases: profile.topPhrases,
-      aiOfferings: profile.aiOfferings || [], notOffered: profile.notOffered || [], pages: profile.pages || [], errors: profile.errors || [], aiNote: profile.aiNote || '',
+      aiOfferings: profile.aiOfferings || [], notOffered: profile.notOffered || [], areasServed: profile.areasServed || [], pages: profile.pages || [], errors: profile.errors || [], aiNote: profile.aiNote || '',
     };
     view.negativeWords = suggestNegativeWords(p.keywords, profile);
     view.adGroups = suggestAdGroups(p.keywords, profile);
@@ -99,30 +104,12 @@ function publicProject(p, role) {
   return view;
 }
 
-// Local scoring for keywords and search terms. Synchronous, so it can run on a freshly loaded project.
-function rescore(p) {
-  if (!p.profile) return;
-  classifyAll(p.keywords, p.profile, p);
-  if (p.searchTerms && p.searchTerms.length) p.stSummary = analyzeTerms(p.searchTerms, p.profile, p);
-}
-
-async function aiReview(pid) {
+// Every route reads the project through here. Older projects are upgraded once and saved straight away,
+// so the ids the page holds stay valid.
+function load(pid) {
   const p = store.get(pid);
-  const border = p.keywords.filter(k => !k.overridden && (k.category === 'review' || (k.relevance >= 0.12 && k.relevance < 0.5))).slice(0, 400);
-  const verdicts = await ai.judgeKeywords(p, p.profile, border);
-  // The model call is slow, so apply the verdicts to the current copy of the project.
-  const fresh = store.get(pid);
-  for (const b of border) {
-    const v = verdicts.get(b.id);
-    const k = fresh.keywords.find(x => x.id === b.id);
-    if (!v || !k || k.overridden) continue;
-    k.category = v.label;
-    k.reason = 'AI: ' + (v.reason || v.label);
-    k.aiChecked = true;
-    k.matchType = matchFor(k, v.label);
-  }
-  store.put(fresh);
-  return verdicts.error ? 'AI check hit an error on some batches: ' + verdicts.error : 'AI reviewed ' + border.length + ' borderline keywords.';
+  if (p && pipeline.upgrade(p)) { pipeline.rescore(p); store.put(p); }
+  return p;
 }
 
 function rebuildBrands(p) {
@@ -136,19 +123,23 @@ function rebuildBrands(p) {
   p.competitorBrands = [...out.values()];
 }
 
-function csvFor(p, type, campaign) {
-  const groups = p.profile ? suggestAdGroups(p.keywords, p.profile) : [];
+function csvFor(p, type, campaign, batchId) {
+  const rows = batchId ? p.keywords.filter(k => k.batchId === batchId) : p.keywords;
+  const groups = p.profile ? suggestAdGroups(rows, p.profile) : [];
   const groupOf = new Map();
   groups.forEach(g => g.ids.forEach(i => groupOf.set(i, g.name)));
-  const by = c => p.keywords.filter(k => k.category === c);
-  const terms = a => (p.searchTerms || []).filter(t => t.action === a);
+  const batchName = new Map(p.batches.map(b => [b.id, b.name]));
+  const by = c => rows.filter(k => k.category === c);
+  const withPerf = rows.some(hasPerf);
+  const withVol = rows.some(k => k.volume != null);
   const detail = ks => toCsv(
-    ['Keyword', 'Category', 'Score', 'Intent', 'Suggested match type', 'Suggested ad group', 'Reason', 'Avg monthly searches', 'Competition', 'Bid'],
-    ks.map(k => [k.keyword, k.category || '', k.score ?? '', k.intent || '', k.matchType || '', groupOf.get(k.id) || '', k.reason || '', k.volume ?? '', k.competition ?? '', k.bid ?? ''])
+    ['Keyword', 'Category', 'Confidence', 'Intent', 'Suggested match type', 'Suggested ad group', 'Reason', 'File', ...(withVol ? ['Avg monthly searches'] : []), ...(withPerf ? ['Impressions', 'Clicks', 'Cost', 'Conversions'] : [])],
+    ks.map(k => [k.keyword, k.category || '', k.confidence != null ? k.confidence + '%' : '', k.intent || '', k.matchType || '', groupOf.get(k.id) || '', [k.reason, k.note].filter(Boolean).join('. '), batchName.get(k.batchId) || '',
+      ...(withVol ? [k.volume ?? ''] : []), ...(withPerf ? [k.impressions ?? '', k.clicks ?? '', k.cost ?? '', k.conversions ?? ''] : [])])
   );
   const camp = campaign || p.campaign || p.name;
   switch (type) {
-    case 'all': return detail(p.keywords);
+    case 'all': return detail(rows);
     case 'priority': return detail(by('priority'));
     case 'relevant': return detail(by('relevant'));
     case 'review': return detail(by('review'));
@@ -159,14 +150,7 @@ function csvFor(p, type, campaign) {
     case 'ads-negatives':
       return toCsv(['Campaign', 'Keyword', 'Criterion Type'], by('negative').map(k => [camp, k.keyword, k.matchType || 'Negative Phrase']));
     case 'negative-words':
-      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], suggestNegativeWords(p.keywords, p.profile || { uni: {} }).map(w => [camp, w.word, 'Negative Broad']));
-    case 'st-negatives':
-      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], terms('block').map(t => [camp, t.term, t.matchType || 'Negative Exact']));
-    case 'st-winners':
-      return toCsv(['Campaign', 'Ad Group', 'Keyword', 'Criterion Type', 'Status'], terms('add').map(t => [camp, 'Search term winners', t.term, t.matchType || 'Phrase', 'Enabled']));
-    case 'st-all':
-      return toCsv(['Search term', 'Action', 'Suggested match type', 'Why', 'Impressions', 'Clicks', 'Cost', 'Conversions', 'Fit to your offer'],
-        (p.searchTerms || []).map(t => [t.term, t.action, t.matchType || '', t.reason || '', t.impressions ?? '', t.clicks ?? '', t.cost ?? '', t.conversions ?? '', t.fit || '']));
+      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], suggestNegativeWords(rows, p.profile || { uni: {} }).map(w => [camp, w.word, 'Negative Broad']));
     default: throw new HttpError(400, 'Unknown export type.');
   }
 }
@@ -206,7 +190,9 @@ async function api(req, res, url) {
   // A custom header cannot be added by a form on another site, which closes off cross-site posts.
   if (method !== 'GET' && method !== 'HEAD' && req.headers['x-csrf'] !== '1') throw new HttpError(403, 'Missing request header. Reload the page and try again.');
 
-  if (parts[0] === 'config') return json({ aiEnabled: ai.enabled(), maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
+  if (parts[0] === 'config') {
+    return json({ aiEnabled: openai.enabled(), aiModel: openai.enabled() ? openai.model() : '', maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
+  }
   if (parts[0] === 'auth') return authRoutes(req, res, parts, json);
 
   const user = auth.userFromReq(req);
@@ -219,8 +205,8 @@ async function api(req, res, url) {
       const b = await readBody(req);
       if (!String(b.name || '').trim()) throw new HttpError(400, 'Give the project a name.');
       const p = {
-        id: store.id(), name: '', url: '', description: '', offerings: '', seeds: [], exclude: [], strictness: 'balanced', campaign: '',
-        blockCompetitors: true, competitors: [], competitorBrands: [], searchTerms: [], stSummary: null,
+        id: store.id(), name: '', url: '', description: '', offerings: '', serviceArea: '', seeds: [], exclude: [], strictness: 'balanced', campaign: '',
+        blockCompetitors: true, competitors: [], competitorBrands: [], batches: [],
         createdAt: new Date().toISOString(), profile: null, keywords: [],
       };
       applyFields(p, b);
@@ -239,24 +225,30 @@ async function api(req, res, url) {
   const send = (p, extra = {}, status = 200) => json({ ...extra, project: publicProject(p, role) }, status);
 
   if (!sub) {
-    if (method === 'GET') return json(publicProject(store.get(pid), role));
+    if (method === 'GET') return json(publicProject(load(pid), role));
     if (method === 'PUT') {
       need('editor');
-      const p = store.get(pid);
+      const p = load(pid);
       const b = await readBody(req);
       const before = JSON.stringify([p.exclude, p.strictness, p.blockCompetitors]);
       applyFields(p, b);
-      if (JSON.stringify([p.exclude, p.strictness, p.blockCompetitors]) !== before) rescore(p);
+      if (JSON.stringify([p.exclude, p.strictness, p.blockCompetitors]) !== before) pipeline.rescore(p);
       store.put(p);
       return json(publicProject(p, role));
     }
     if (method === 'DELETE') { need('owner'); store.remove(pid); return json({ ok: true }); }
   }
 
+  // Cheap enough to poll every couple of seconds while AI is working.
+  if (sub === 'status' && method === 'GET') {
+    const p = load(pid);
+    return json({ batches: p.batches.map(b => ({ id: b.id, ai: b.ai, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)) })), busy: p.batches.some(b => b.ai && b.ai.status === 'running') });
+  }
+
   if (sub === 'analyze' && method === 'POST') {
     need('editor');
     const b = await readBody(req);
-    const p0 = store.get(pid);
+    const p0 = load(pid);
     applyFields(p0, b);
     store.put(p0); // keep what was typed even if the crawl fails
     if (!p0.url && !p0.description && !p0.offerings && !p0.seeds.length) throw new HttpError(400, 'Add a website address or describe what you sell first.');
@@ -268,152 +260,133 @@ async function api(req, res, url) {
         errors = [{ url: p0.url, error: e.message }];
       }
     }
-    let extraTerms = [], aiInfo = {}, aiNote = '';
-    if (ai.enabled() && (pages.length || p0.description)) {
-      try { aiInfo = await ai.describeBusiness(p0, pages); extraTerms = aiInfo.offerings; }
+    let extraTerms = [], info = {}, aiNote = '';
+    if (openai.enabled() && (pages.length || p0.description)) {
+      try { info = await openai.describeBusiness(p0, pages); extraTerms = info.offerings; }
       catch (e) { aiNote = 'AI summary skipped: ' + e.message; }
     }
-    const p = store.get(pid); // reload: teammates may have edited while the crawl ran
+    const p = load(pid); // reload: teammates may have edited while the crawl ran
     const profile = buildProfile({ project: p, pages, extraTerms });
-    profile.summary = aiInfo.summary || '';
-    profile.aiOfferings = aiInfo.offerings || [];
-    profile.notOffered = aiInfo.notOffered || [];
+    profile.summary = info.summary || '';
+    profile.aiOfferings = info.offerings || [];
+    profile.notOffered = info.notOffered || [];
+    profile.areasServed = info.areasServed || [];
     profile.aiNote = aiNote;
     profile.pages = pages.map(pg => ({ url: pg.url, title: pg.title, words: pg.text.split(' ').length }));
     profile.errors = errors;
     if (!profile.topTerms.length) throw new HttpError(422, 'Not enough readable text to build a profile. Add a description or a few seed keywords.');
     p.profile = profile;
-    rescore(p);
+    pipeline.rescore(p);
     store.put(p);
-    return json(publicProject(p, role));
+    // Uploads that were waiting for a business profile can be checked now.
+    for (const bt of p.batches) if (bt.ai && bt.ai.status === 'waiting') pipeline.startAI(pid, bt.id);
+    return json(publicProject(store.get(pid), role));
   }
 
-  if (sub === 'keywords') {
-    if (method === 'POST') {
+  /* ----- uploads: every file or paste becomes its own upload ----- */
+  if (sub === 'uploads') {
+    const bid = parts[3];
+    if (method === 'POST' && !bid) {
       need('editor');
       const b = await readBody(req);
-      const { rows, skipped, note } = extractKeywords(b.text);
-      if (!rows.length) throw new HttpError(400, 'No keywords found in that input.');
-      const p = store.get(pid);
-      const have = new Set(p.keywords.map(k => k.keyword.toLowerCase()));
-      let added = 0, dupes = 0, overLimit = 0;
-      for (const r of rows) {
-        if (have.has(r.keyword.toLowerCase())) { dupes++; continue; }
-        if (p.keywords.length >= MAX_KEYWORDS) { overLimit++; continue; }
-        p.keywords.push({ id: store.id(), ...r });
-        have.add(r.keyword.toLowerCase());
-        added++;
+      let parsed = extractKeywords(b.text);
+      if (parsed.needsMapping && openai.enabled()) {
+        try { parsed = extractKeywords(b.text, { mapping: await openai.mapColumns(parsed.sample) }); } catch { /* keep the first-column reading */ }
       }
-      rescore(p);
+      const { rows, note } = parsed;
+      if (!rows.length) throw new HttpError(400, 'No keywords found in that file.');
+      const p = load(pid);
+      const byKw = new Map(p.keywords.map(k => [k.keyword.toLowerCase(), k]));
+      const fresh = [];
+      let dupes = 0, updated = 0, overLimit = 0;
+      for (const r of rows) {
+        const have = byKw.get(r.keyword.toLowerCase());
+        if (have) {
+          // A later report for a keyword already held brings its results along.
+          if (hasPerf(r) && !hasPerf(have)) { for (const f of ['impressions', 'clicks', 'cost', 'conversions', 'convValue', 'status']) if (r[f] != null) have[f] = r[f]; updated++; }
+          else dupes++;
+          continue;
+        }
+        if (fresh.length >= MAX_KEYWORDS || p.keywords.length + fresh.length >= MAX_PROJECT_KEYWORDS) { overLimit++; continue; }
+        fresh.push(r);
+      }
+      if (!fresh.length && !updated) throw new HttpError(409, `Nothing new here. All ${dupes} keywords are already in this project.`);
+      let batch = null;
+      if (fresh.length) {
+        const perf = fresh.some(hasPerf);
+        const kind = perf ? 'Search terms report' : fresh.some(r => r.volume != null || r.bid != null || r.competition != null) ? 'Keyword tool export' : 'Keyword list';
+        const stamp = new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC';
+        const name = String(b.name || '').trim() || String(b.filename || '').replace(/\.[a-z0-9]+$/i, '').trim() || `${kind} ${stamp}`;
+        batch = pipeline.newBatch({ name: name.slice(0, 80), filename: String(b.filename || '').slice(0, 120), kind });
+        p.batches.push(batch);
+        for (const r of fresh) p.keywords.push({ id: store.id(), batchId: batch.id, ...r });
+      }
+      pipeline.rescore(p);
       store.put(p);
-      return send(p, { added, duplicates: dupes + skipped, overLimit, note });
+      if (batch) pipeline.startAI(pid, batch.id);
+      return send(load(pid), { batchId: batch && batch.id, added: fresh.length, duplicates: dupes, updated, overLimit, note });
     }
-    if (method === 'DELETE') {
+    if (bid && method === 'PATCH') {
       need('editor');
-      const p = store.get(pid);
-      p.keywords = [];
+      const b = await readBody(req);
+      const p = load(pid);
+      const batch = p.batches.find(x => x.id === bid);
+      if (!batch) throw new HttpError(404, 'Upload not found');
+      const name = String(b.name || '').trim().slice(0, 80);
+      if (!name) throw new HttpError(400, 'Give the upload a name.');
+      batch.name = name;
       store.put(p);
       return json(publicProject(p, role));
     }
-  }
-
-  if (sub === 'classify' && method === 'POST') {
-    need('editor');
-    const p = store.get(pid);
-    if (!p.profile) throw new HttpError(409, 'Analyze the project first so there is something to compare against.');
-    const b = await readBody(req);
-    if (b.reset) { p.keywords.forEach(k => { delete k.overridden; }); (p.searchTerms || []).forEach(t => { delete t.overridden; }); }
-    rescore(p);
-    store.put(p);
-    const note = b.useAI && ai.enabled() ? await aiReview(pid) : '';
-    return send(store.get(pid), { note });
+    if (bid && method === 'DELETE') {
+      need('editor');
+      const p = load(pid);
+      if (!p.batches.some(x => x.id === bid)) throw new HttpError(404, 'Upload not found');
+      p.batches = p.batches.filter(x => x.id !== bid);
+      p.keywords = p.keywords.filter(k => k.batchId !== bid);
+      pipeline.rescore(p);
+      store.put(p);
+      return json(publicProject(p, role));
+    }
+    if (bid && parts[4] === 'recheck' && method === 'POST') {
+      need('editor');
+      const p = load(pid);
+      const batch = p.batches.find(x => x.id === bid);
+      if (!batch) throw new HttpError(404, 'Upload not found');
+      if (!openai.enabled()) throw new HttpError(409, 'AI is not switched on for this server. Add OPENAI_API_KEY and restart.');
+      if (!p.profile) throw new HttpError(409, 'Analyze the business first so the AI knows what you sell.');
+      if (batch.ai && batch.ai.status === 'running' && pipeline.isRunning(pid, bid)) throw new HttpError(409, 'That upload is already being checked.');
+      pipeline.startAI(pid, bid);
+      return json(publicProject(store.get(pid), role));
+    }
   }
 
   if (sub === 'keyword' && parts[3]) {
     need('editor');
-    const p = store.get(pid);
+    const p = load(pid);
     const k = p.keywords.find(x => x.id === parts[3]);
     if (!k) throw new HttpError(404, 'Keyword not found');
     if (method === 'PATCH') {
       const b = await readBody(req);
       if (!CATEGORIES.includes(b.category)) throw new HttpError(400, 'Unknown category');
+      // Remember what the tool first said, so later AI runs can learn from the correction.
+      if (!k.corrected && k.category !== b.category) k.corrected = { from: k.category || 'unsorted' };
       k.category = b.category;
       k.overridden = true;
+      k.source = 'you';
+      k.confidence = undefined;
       k.reason = 'Set by you';
-      k.matchType = matchFor(k, b.category);
+      k.matchType = matchFor(k.keyword, b.category);
+      pipeline.rescore(p);
       store.put(p);
       return json(publicProject(p, role));
     }
     if (method === 'DELETE') {
       p.keywords = p.keywords.filter(x => x.id !== k.id);
+      pipeline.rescore(p);
       store.put(p);
       return json(publicProject(p, role));
     }
-  }
-
-  /* ----- search terms report ----- */
-  if (sub === 'searchterms') {
-    if (method === 'POST' && parts[3] === 'add-winners') {
-      need('editor');
-      const p = store.get(pid);
-      if (!p.profile) throw new HttpError(409, 'Analyze the project first.');
-      const opts = buildOpts(p.profile, p);
-      const have = new Set(p.keywords.map(k => k.keyword.toLowerCase()));
-      let added = 0, skipped = 0;
-      for (const t of p.searchTerms || []) {
-        if (t.action !== 'add') continue;
-        if (have.has(t.term.toLowerCase())) { t.status = 'Added'; continue; }
-        if (p.keywords.length >= MAX_KEYWORDS) { skipped++; continue; }
-        const row = { id: store.id(), keyword: t.term, impressions: t.impressions, clicks: t.clicks, cost: t.cost, conversions: t.conversions };
-        Object.assign(row, classifyOne(row, p.profile, opts), { category: 'priority', overridden: true, reason: 'Converted in your campaign', source: 'search terms' });
-        row.matchType = matchFor(row, 'priority');
-        p.keywords.push(row);
-        have.add(t.term.toLowerCase());
-        t.status = 'Added';
-        added++;
-      }
-      rescore(p);
-      store.put(p);
-      return send(p, { added, skipped });
-    }
-    if (method === 'POST') {
-      need('editor');
-      const b = await readBody(req);
-      const { rows, note } = extractKeywords(b.text, { aggregate: true });
-      if (!rows.length) throw new HttpError(400, 'No search terms found in that input.');
-      if (!rows.some(r => r.clicks != null || r.cost != null)) throw new HttpError(400, 'No Clicks or Cost columns found. Export the "Search terms" report from Google Ads (Insights and reports, then Search terms), not the Keywords list.');
-      const p = store.get(pid);
-      p.searchTerms = rows.slice(0, MAX_TERMS).map(r => ({
-        id: store.id(), term: r.keyword, impressions: r.impressions, clicks: r.clicks, cost: r.cost, conversions: r.conversions, convValue: r.convValue, status: r.status,
-      }));
-      p.stMeta = { importedAt: new Date().toISOString(), note, truncated: rows.length > MAX_TERMS };
-      p.stSummary = analyzeTerms(p.searchTerms, p.profile, p);
-      store.put(p);
-      return send(p, { imported: p.searchTerms.length, note });
-    }
-    if (method === 'DELETE') {
-      need('editor');
-      const p = store.get(pid);
-      p.searchTerms = []; p.stSummary = null; p.stMeta = null;
-      store.put(p);
-      return json(publicProject(p, role));
-    }
-  }
-
-  if (sub === 'searchterm' && parts[3] && method === 'PATCH') {
-    need('editor');
-    const b = await readBody(req);
-    if (!ACTIONS.includes(b.action)) throw new HttpError(400, 'Unknown action');
-    const p = store.get(pid);
-    const t = (p.searchTerms || []).find(x => x.id === parts[3]);
-    if (!t) throw new HttpError(404, 'Search term not found');
-    t.action = b.action;
-    t.overridden = true;
-    t.reason = 'Set by you';
-    t.matchType = b.action === 'block' ? 'Negative Exact' : b.action === 'add' ? (t.term.split(' ').length >= 3 ? 'Exact' : 'Phrase') : '';
-    p.stSummary = analyzeTerms(p.searchTerms, p.profile, p);
-    store.put(p);
-    return json(publicProject(p, role));
   }
 
   /* ----- competitors ----- */
@@ -423,7 +396,7 @@ async function api(req, res, url) {
       const b = await readBody(req);
       const urls = splitList(b.urls).slice(0, MAX_COMPETITORS);
       if (!urls.length) throw new HttpError(400, 'Enter at least one competitor website.');
-      const own = (() => { try { return new URL(store.get(pid).url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
+      const own = (() => { try { return new URL(load(pid).url).hostname.replace(/^www\./, ''); } catch { return ''; } })();
       const results = await Promise.allSettled(urls.map(crawlCompetitor));
       const found = [], failed = [];
       results.forEach((r, i) => {
@@ -432,19 +405,19 @@ async function api(req, res, url) {
         else failed.push({ url: urls[i], error: r.reason.message });
       });
       if (!found.length) throw new HttpError(422, 'Could not read any of those sites: ' + failed.map(f => f.url + ' (' + f.error + ')').join('; '));
-      const p = store.get(pid);
+      const p = load(pid);
       p.competitors = found;
       rebuildBrands(p);
-      rescore(p);
+      pipeline.rescore(p);
       store.put(p);
       return send(p, { failed });
     }
     if (method === 'DELETE' && parts[3]) {
       need('editor');
-      const p = store.get(pid);
+      const p = load(pid);
       p.competitors = (p.competitors || []).filter(c => c.id !== parts[3]);
       rebuildBrands(p);
-      rescore(p);
+      pipeline.rescore(p);
       store.put(p);
       return json(publicProject(p, role));
     }
@@ -453,11 +426,11 @@ async function api(req, res, url) {
   if (sub === 'brand' && method === 'PATCH') {
     need('editor');
     const b = await readBody(req);
-    const p = store.get(pid);
+    const p = load(pid);
     const br = (p.competitorBrands || []).find(x => x.phrase === b.phrase);
     if (!br) throw new HttpError(404, 'Brand not found');
     br.enabled = Boolean(b.enabled);
-    rescore(p);
+    pipeline.rescore(p);
     store.put(p);
     return json(publicProject(p, role));
   }
@@ -495,10 +468,13 @@ async function api(req, res, url) {
   }
 
   if (sub === 'export' && method === 'GET') {
-    const p = store.get(pid);
+    const p = load(pid);
     const type = url.searchParams.get('type') || 'all';
-    const csv = csvFor(p, type, url.searchParams.get('campaign'));
-    const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
+    const bid = url.searchParams.get('batch') || '';
+    const batch = bid ? p.batches.find(b => b.id === bid) : null;
+    if (bid && !batch) throw new HttpError(404, 'Upload not found');
+    const csv = csvFor(p, type, url.searchParams.get('campaign'), bid);
+    const slug = (batch ? batch.name : p.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
     res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${slug}-${type}.csv"`, 'cache-control': 'no-store' });
     return res.end(csv);
   }
@@ -540,7 +516,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
-  server.listen(PORT, () => console.log(`Keyword Sieve running on http://localhost:${PORT}` + (ai.enabled() ? ' (AI review on)' : ' (offline scoring only)')));
+  server.listen(PORT, () => console.log(`Keyword Sieve running on http://localhost:${PORT}` + (openai.enabled() ? ' (OpenAI review on, model ' + openai.model() + ')' : ' (rules only, no OPENAI_API_KEY set)')));
 }
 
 module.exports = server;
