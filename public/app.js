@@ -19,7 +19,7 @@ const state = {
   goAfterRead: false, expanded: new Set(), fromRoute: false,
 };
 // The page asks the server which version it is. A server that was not restarted after an update reports an older one.
-const EXPECTED_API = 3;
+const EXPECTED_API = 4;
 const busyAI = b => b.ai && (b.ai.status === 'running' || b.ai.status === 'queued');
 const reading = p => Boolean(p && p.analysis && p.analysis.status === 'running');
 

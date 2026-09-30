@@ -23,7 +23,7 @@ const mock = http.createServer((req, res) => {
     }
     const b = JSON.parse(body);
     const sys = b.messages[0].content, user = b.messages[1].content;
-    const reply = obj => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(obj) } }] })); };
+    const reply = obj => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(obj) } }], usage: { prompt_tokens: 1000, completion_tokens: 200, prompt_tokens_details: { cached_tokens: 100 } } })); };
     const lines = [...user.matchAll(/^(\d+)\. (.*?)(?: \[[^\]]*\])?$/gm)].map(m => ({ i: Number(m[1]), kw: m[2] }));
     if (/RE-CHECK/.test(sys)) {
       calls.push({ kind: 'verify', user, n: lines.length });
@@ -288,4 +288,15 @@ test('a site that cannot be read is reported, and a cut-short read is flagged', 
   raw.analysis = { status: 'running', done: 4, total: 50 };
   store.put(raw);
   assert.equal((await call('GET', `/projects/${other}`)).data.analysis.status, 'interrupted');
+});
+
+test('every model call is recorded under the project owner with its token counts', async () => {
+  const store = require('../lib/db');
+  const owner = store.userByEmail('o@x.test');
+  const rows = store.usageGroups('', owner.id);
+  const kinds = new Set(rows.map(r => r.kind));
+  assert.ok(kinds.has('catalogue') && kinds.has('judge'), [...kinds].join());
+  const calls = rows.reduce((n, r) => n + r.calls - r.errors, 0); // failed calls carry no tokens
+  assert.equal(rows.reduce((n, r) => n + r.prompt, 0), calls * 1000);
+  assert.equal(rows.reduce((n, r) => n + r.cached, 0), calls * 100);
 });

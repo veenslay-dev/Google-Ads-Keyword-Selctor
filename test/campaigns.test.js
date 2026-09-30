@@ -167,7 +167,7 @@ test('project options: edit, change the address (owner only), duplicate, delete'
   const carol = client();
   await signup(carol, 'Carol');
   await ann('POST', `/projects/${pid}/members`, { email: 'carol@x.test', role: 'editor' });
-  assert.equal((await ann('GET', '/config')).data.apiVersion, 3);
+  assert.equal((await ann('GET', '/config')).data.apiVersion, 4);
 
   const before = (await ann('GET', `/projects/${pid}`)).data;
   assert.equal(before.slug, 'dinesh-aarjav-nri-tax');

@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const store = require('./lib/db');
 const auth = require('./lib/auth');
+const plan = require('./lib/plan');
+const admin = require('./lib/admin');
 const openai = require('./lib/openai');
 const pipeline = require('./lib/pipeline');
 const { matchFor, hasPerf } = require('./lib/performance');
@@ -26,13 +28,22 @@ const CATEGORIES = ['priority', 'relevant', 'review', 'negative'];
 const RANK = { viewer: 1, editor: 2, owner: 3 };
 const MAX_PROJECT_KEYWORDS = 20000;
 // Bumped when the pages need something new from the server. The page compares it and asks for a restart if the server is behind.
-const API_VERSION = 3;
+const API_VERSION = 4;
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'same-origin',
   'x-frame-options': 'DENY',
   'content-security-policy': "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
 };
+
+// Every OpenAI call reports its token counts here, filed under the project owner (the person the cost belongs to).
+openai.setRecorder(r => {
+  const u = r.usage || {};
+  try {
+    store.addUsage({ userId: r.meta && r.meta.owner, projectId: r.meta && r.meta.project, kind: r.kind, model: r.model, ok: r.ok,
+      promptTokens: u.prompt_tokens, completionTokens: u.completion_tokens, cachedTokens: u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens });
+  } catch (e) { console.error('usage not recorded', e.message); }
+});
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -113,7 +124,7 @@ function summary(p, role, ownerName, memberCount, slug) {
 // The full profile weight tables are large and only useful server side.
 function publicProject(p, role) {
   const { profile, competitors = [], knowledge, ...rest } = p;
-  const view = { ...rest, role, counts: countsOf(p.keywords), perfSummary: p.perfSummary || null };
+  const view = { ...rest, role, counts: countsOf(p.keywords), perfSummary: p.perfSummary || null, limits: plan.limitsFor(store.ownerOf(p.id)) };
   view.campaigns = (p.campaigns || []).map(c => {
     const bs = p.batches.filter(b => b.campaignId === c.id);
     return { ...c, uploads: bs.length, counts: countsOf(p.keywords.filter(k => bs.some(b => b.id === k.batchId))) };
@@ -198,7 +209,17 @@ function csvFor(p, type, scope = {}) {
 async function authRoutes(req, res, parts, json) {
   const ip = req.socket.remoteAddress || '';
   const sub = parts[1];
-  if (sub === 'me' && req.method === 'GET') return json({ user: auth.userFromReq(req) });
+  if (sub === 'me' && req.method === 'GET') {
+    const user = auth.userFromReq(req);
+    return json({ user, plan: user ? plan.summaryFor(user.id) : null });
+  }
+  if (sub === 'password' && req.method === 'POST') {
+    const user = auth.userFromReq(req);
+    if (!user) throw new HttpError(401, 'Sign in to continue.');
+    const b = await readBody(req);
+    auth.changePassword(user.id, b.current, b.next);
+    return json({ ok: true });
+  }
   if (sub === 'register' && req.method === 'POST') {
     const r = auth.register(await readBody(req));
     res.setHeader('set-cookie', auth.cookie(r.token, auth.SESSION_MS / 1000));
@@ -217,6 +238,30 @@ async function authRoutes(req, res, parts, json) {
   throw new HttpError(404, 'Not found');
 }
 
+async function adminRoutes(req, parts, user, json) {
+  if (!user.isAdmin) throw new HttpError(403, 'Admins only.');
+  const m = req.method, what = parts[1], id = parts[2], more = parts[3];
+  if (what === 'overview' && m === 'GET') return json(admin.overview());
+  if (what === 'activity' && m === 'GET') return json(admin.activity());
+  if (what === 'settings') {
+    if (m === 'GET') return json(admin.settings());
+    if (m === 'PUT') return json(admin.updateSettings(user, await readBody(req)));
+  }
+  if (what === 'users') {
+    if (!id) {
+      if (m === 'GET') return json(admin.users());
+      if (m === 'POST') return json(admin.createUser(user, await readBody(req)), 201);
+    } else if (!more) {
+      if (m === 'GET') return json(admin.userDetail(id));
+      if (m === 'PATCH') return json(admin.updateUser(user, id, await readBody(req)));
+      if (m === 'DELETE') return json(admin.deleteUser(user, id, (await readBody(req)).confirmEmail));
+    } else if (more === 'password' && m === 'POST') {
+      return json(admin.setPassword(user, id, (await readBody(req)).password));
+    }
+  }
+  throw new HttpError(404, 'Not found');
+}
+
 async function api(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop "api"
   const method = req.method;
@@ -229,12 +274,13 @@ async function api(req, res, url) {
   if (method !== 'GET' && method !== 'HEAD' && req.headers['x-csrf'] !== '1') throw new HttpError(403, 'Missing request header. Reload the page and try again.');
 
   if (parts[0] === 'config') {
-    return json({ apiVersion: API_VERSION, aiEnabled: openai.enabled(), maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, maxPages: MAX_SITE_PAGES, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
+    return json({ apiVersion: API_VERSION, aiEnabled: openai.enabled() && store.getSetting('aiEnabled', true), maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, maxPages: MAX_SITE_PAGES, signupOpen: auth.signupOpen() || store.userCount() === 0 });
   }
   if (parts[0] === 'auth') return authRoutes(req, res, parts, json);
 
   const user = auth.userFromReq(req);
   if (!user) throw new HttpError(401, 'Sign in to continue.');
+  if (parts[0] === 'admin') return adminRoutes(req, parts, user, json, url);
   if (parts[0] !== 'projects') throw new HttpError(404, 'Not found');
 
   if (parts.length === 1) {
@@ -247,6 +293,8 @@ async function api(req, res, url) {
     if (method === 'POST') {
       const b = await readBody(req);
       if (!String(b.name || '').trim()) throw new HttpError(400, 'Give the project a name.');
+      const blocked = user.isAdmin ? null : plan.projectsMessage(user.id);
+      if (blocked) throw new HttpError(403, blocked);
       const p = {
         id: store.id(), name: '', url: '', description: '', offerings: '', serviceArea: '', seeds: [], exclude: [], strictness: 'balanced',
         blockCompetitors: true, competitors: [], competitorBrands: [], batches: [], campaigns: [],
@@ -293,6 +341,8 @@ async function api(req, res, url) {
   // but none of the keywords. Saves re-reading the site for a similar client or a second account.
   if (sub === 'duplicate' && method === 'POST') {
     need('editor');
+    const blockedCopy = user.isAdmin ? null : plan.projectsMessage(user.id);
+    if (blockedCopy) throw new HttpError(403, blockedCopy);
     const src = load(pid);
     const clone = x => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
     const copy = {
@@ -327,6 +377,8 @@ async function api(req, res, url) {
     applyFields(p, b);
     if (!p.url && !p.description && !p.offerings && !p.seeds.length) throw new HttpError(400, 'Add a website address or describe what you sell first.');
     store.put(p); // keep what was typed even if reading the site fails
+    const okToRun = plan.aiAllowed(store.ownerOf(pid));
+    if (!okToRun.ok && openai.enabled()) throw new HttpError(409, okToRun.reason);
     pipeline.startAnalysis(pid);
     return json(publicProject(store.get(pid), role));
   }
@@ -338,8 +390,9 @@ async function api(req, res, url) {
       need('editor');
       const b = await readBody(req);
       let parsed = extractKeywords(b.text);
-      if (parsed.needsMapping && openai.enabled()) {
-        try { parsed = extractKeywords(b.text, { mapping: await openai.mapColumns(parsed.sample) }); } catch { /* keep the first-column reading */ }
+      const ownerId = store.ownerOf(pid);
+      if (parsed.needsMapping && openai.enabled() && plan.aiAllowed(ownerId).ok) {
+        try { parsed = extractKeywords(b.text, { mapping: await openai.mapColumns(parsed.sample, { owner: ownerId, project: pid }) }); } catch { /* keep the first-column reading */ }
       }
       const { rows, note } = parsed;
       if (!rows.length) throw new HttpError(400, 'No keywords found in that file.');
@@ -347,7 +400,8 @@ async function api(req, res, url) {
       const p = load(pid);
       const byKw = new Map(p.keywords.map(k => [k.keyword.toLowerCase(), k]));
       const fresh = [];
-      let dupes = 0, updated = 0, overLimit = 0;
+      let dupes = 0, updated = 0, overLimit = 0, planLimited = 0;
+      const room = plan.keywordRoom(ownerId, p);
       for (const r of rows) {
         const have = byKw.get(r.keyword.toLowerCase());
         if (have) {
@@ -356,9 +410,11 @@ async function api(req, res, url) {
           else dupes++;
           continue;
         }
+        if (fresh.length >= room.room) { planLimited++; continue; }
         if (fresh.length >= MAX_KEYWORDS || p.keywords.length + fresh.length >= MAX_PROJECT_KEYWORDS) { overLimit++; continue; }
         fresh.push(r);
       }
+      if (!fresh.length && !updated && planLimited) throw new HttpError(403, `No room for these keywords. ${room.message} Ask the administrator to raise it.`);
       if (!fresh.length && !updated) throw new HttpError(409, `Nothing new here. All ${dupes} keywords are already in this project.`);
       let batch = null;
       if (fresh.length) {
@@ -367,7 +423,11 @@ async function api(req, res, url) {
         if (b.campaignId && !camp) throw new HttpError(404, 'Campaign not found');
         if (!camp) {
           if (p.campaigns.length === 1) camp = p.campaigns[0];
-          else if (!p.campaigns.length) camp = pipeline.newCampaign(p, 'General');
+          else if (!p.campaigns.length) {
+            const full = plan.campaignsMessage(ownerId, p);
+            if (full) throw new HttpError(403, full);
+            camp = pipeline.newCampaign(p, 'General');
+          }
           else throw new HttpError(400, 'Choose which campaign these keywords belong to.');
         }
         const perf = fresh.some(hasPerf);
@@ -382,8 +442,9 @@ async function api(req, res, url) {
       }
       pipeline.rescore(p);
       store.put(p);
+      store.addUploaded(ownerId, fresh.length);
       if (batch) pipeline.startAI(pid, batch.id);
-      return send(load(pid), { batchId: batch && batch.id, added: fresh.length, duplicates: dupes, updated, overLimit, note });
+      return send(load(pid), { batchId: batch && batch.id, added: fresh.length, duplicates: dupes, updated, overLimit, planLimited, planMessage: planLimited ? room.message : '', note });
     }
     if (bid && method === 'PATCH') {
       need('editor');
@@ -427,6 +488,8 @@ async function api(req, res, url) {
       const batch = p.batches.find(x => x.id === bid);
       if (!batch) throw new HttpError(404, 'Upload not found');
       if (!openai.enabled()) throw new HttpError(409, 'Smart analysis is not switched on for this server. Add OPENAI_API_KEY and restart.');
+      const allowed = plan.aiAllowed(store.ownerOf(pid));
+      if (!allowed.ok) throw new HttpError(409, allowed.reason);
       if (!p.profile) throw new HttpError(409, 'Read the business website first so the analysis knows what you sell.');
       if (pipeline.isRunning(pid, bid)) throw new HttpError(409, 'That upload is already being analysed.');
       pipeline.startAI(pid, bid);
@@ -445,6 +508,8 @@ async function api(req, res, url) {
       const pageUrl = String(b.pageUrl || '').trim() ? normalizeUrl(b.pageUrl) : '';
       const p = load(pid);
       if (p.campaigns.some(c => c.name.toLowerCase() === name.toLowerCase())) throw new HttpError(409, 'A campaign with that name already exists.');
+      const full = plan.campaignsMessage(store.ownerOf(pid), p);
+      if (full) throw new HttpError(403, full);
       const c = pipeline.newCampaign(p, name, pageUrl);
       store.put(p);
       return send(load(pid), { campaignId: c.id }, 201);
