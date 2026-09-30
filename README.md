@@ -27,6 +27,7 @@ Environment variables:
 - `DATA_DIR` where the SQLite database `app.db` lives (default `./data`)
 - `DB_PATH` full path to the database file, or `:memory:` for tests
 - `BASE_PATH` mounts the app under a path on an existing site, for example `/keyword-selector`. It works whether or not your web server strips the prefix, and the login cookie is limited to that path.
+- `ADMIN_EMAILS` makes those accounts admins (see Admin panel)
 - `ALLOW_SIGNUP=0` closes public sign-up once the first account exists (see Accounts)
 - `COOKIE_SECURE=1` marks the session cookie Secure. Set it whenever the app is served over HTTPS.
 - `ALLOW_PRIVATE_HOSTS=1` lets the crawler fetch localhost and private addresses. Leave it off unless you are testing.
@@ -126,6 +127,18 @@ The owner shares from the **Share** button by typing the email of someone who al
 A project you have no access to answers "not found", the same as one that does not exist. Passwords are hashed with scrypt, sessions are random tokens stored hashed in the database, failed logins are throttled per address and email, and every change request needs a custom header so another website cannot trigger one from your browser.
 
 Two people editing at once is safe at the level of a single action, because every request reads the current project. If you both edit the same keyword at the same moment, the last save wins. There is no live cursor or refresh: the other person's changes appear when you reload or reopen the project.
+
+## Admin panel
+
+Admins get an **Admin** link in the top bar (`/admin`). The first account ever created is an admin. To make others admins at start-up, list their emails in `ADMIN_EMAILS` (comma separated). An install that already has accounts promotes its earliest account automatically.
+
+- **Overview**: people signed up (with a 30 day chart), keywords held and uploaded, projects, campaigns, analysis cost this month and all time, cost by step and by model, biggest spenders, and system facts.
+- **Users**: search, filter and sort everyone. Open a person to set their limits, suspend or restore them, make them an admin, set a password, add a private note, or delete them.
+- **Limits** per person: projects, campaigns per project, keywords per project, keywords in total, a monthly analysis budget, and an analysis on/off switch. Empty means "use the default", **No limit** removes the cap, admins are never limited. Campaigns, keywords and analysis on a project count against the project owner, whoever is editing.
+- **Settings**: open or close sign-ups, switch analysis off for everyone, default limits, and the token price table.
+- **Activity**: the last 100 changes made from the panel.
+
+Cost is an estimate: every OpenAI call stores its token counts, and the cost is worked out from the price table in Settings each time it is shown, so correcting a price also corrects the history. The OpenAI bill is the real figure. Models missing from the price table count as $0 and are flagged on the Overview. Admins see names and counts, not keywords or business details.
 
 ## Competitors
 

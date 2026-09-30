@@ -3,6 +3,7 @@
 paintIcons();
 document.querySelectorAll('.theme button').forEach(b => (b.onclick = () => setTheme(b.dataset.theme)));
 setTheme(document.documentElement.dataset.theme);
+$('#chpass').onclick = () => { $('#userbox').open = false; changePasswordDialog(); };
 $('#signout').onclick = () => { $('#userbox').open = false; signOut(); };
 
 // Links marked data-link change the page without a reload, and keep the address bar in step.

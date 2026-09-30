@@ -154,6 +154,7 @@ function uploadMessage(label, r) {
   if (r.added) bits.push(`${r.added} new keyword${r.added === 1 ? '' : 's'}`);
   if (r.updated) bits.push(`results added to ${r.updated} you already had`);
   if (r.duplicates) bits.push(`${r.duplicates} already in the project, skipped`);
+  if (r.planLimited) bits.push(`${r.planLimited} left out. ${r.planMessage} Ask the administrator to raise it`);
   if (r.overLimit) bits.push(`${r.overLimit} left out because one upload holds ${state.config.maxKeywords}. Upload them as another file`);
   return `${label}: ${bits.join(', ') || 'nothing to add'}.`;
 }

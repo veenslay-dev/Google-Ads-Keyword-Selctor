@@ -10,8 +10,8 @@ const CAT_RANK = { priority: 0, relevant: 1, review: 2, negative: 3, undefined: 
 
 const state = {
   config: { aiEnabled: false, maxKeywords: 1000, maxCompetitors: 3, maxPages: 50 },
-  user: null, projects: [], slugs: {}, project: null,
-  page: 'home',            // home, projects, new, project
+  user: null, plan: null, projects: [], slugs: {}, project: null,
+  page: 'home',            // home, projects, new, project, admin
   view: 'keywords',        // inside a project: keywords (all), campaign, business, competitors, team
   campaignId: null,
   scope: 'all', filter: 'all', search: '', sort: { key: 'category', dir: 'asc' },
@@ -79,11 +79,18 @@ function lockIfViewer() {
 /* ---------- addresses ---------- */
 // / home, /projects list, /projects/new, /projects/<slug>, /projects/<slug>/campaigns/<campaign>,
 // /projects/<slug>/business, /competitors, /team
+// "You are using 2 of 5" when the administrator has set a limit, nothing otherwise.
+function allowance(key, what) {
+  const lim = state.plan && state.plan.limits[key];
+  if (lim === null || lim === undefined) return '';
+  return ` <span class="allow">Using ${state.plan.usage[key]} of ${lim} ${what}.</span>`;
+}
 function projectSlug(p) { return state.slugs[p.id] || p.slug; }
 
 function pathFor() {
   if (state.page === 'home') return '/';
   if (state.page === 'projects') return '/projects';
+  if (state.page === 'admin') return '/admin' + ({ overview: '', users: '/users', user: '/users/' + A.userId, settings: '/settings', activity: '/activity' }[A.tab] || '');
   if (state.page === 'new' || !state.project) return '/projects/new';
   const root = '/projects/' + projectSlug(state.project);
   const c = currentCampaign();
@@ -95,6 +102,7 @@ function pathFor() {
 function titleFor() {
   const tail = ' · Keyword Selector';
   if (state.page === 'projects') return 'Projects' + tail;
+  if (state.page === 'admin') return 'Admin' + tail;
   if (state.page === 'new') return 'New project' + tail;
   if (state.page === 'project' && state.project) {
     const c = currentCampaign();
@@ -115,6 +123,7 @@ function parsePath() {
   let p = location.pathname;
   if (BASE && p.startsWith(BASE)) p = p.slice(BASE.length);
   const seg = p.split('/').filter(Boolean).map(s => { try { return decodeURIComponent(s); } catch { return s; } });
+  if (seg[0] === 'admin') return { page: 'admin', tab: seg[1] === 'users' ? (seg[2] ? 'user' : 'users') : ['settings', 'activity'].includes(seg[1]) ? seg[1] : 'overview', id: seg[2] };
   if (seg[0] !== 'projects') return { page: 'home' };
   if (seg.length === 1) return { page: 'projects' };
   if (seg[1] === 'new') return { page: 'new' };
@@ -132,6 +141,11 @@ async function route() {
   clearTimeout(pollTimer);
   const r = parsePath();
   state.fromRoute = true;
+  if (r.page === 'admin') {
+    state.page = 'admin'; state.project = null; A.tab = r.tab; A.userId = r.id || null;
+    render();
+    return;
+  }
   if (r.page !== 'project') {
     state.page = r.page; state.project = null; state.view = 'keywords';
     if (r.page === 'new') state.view = 'business';
@@ -160,6 +174,7 @@ function go(path) {
 
 async function refreshList() {
   state.projects = await api('/projects');
+  api('/auth/me').then(me => { state.plan = me.plan; }).catch(() => {});
   state.slugs = Object.fromEntries(state.projects.map(p => [p.id, p.slug]));
 }
 
@@ -231,7 +246,7 @@ function renderProjects() {
     return;
   }
   main.innerHTML = `
-    <div class="lhead"><div><h1>Projects</h1><p class="sub">${state.projects.length} project${state.projects.length === 1 ? '' : 's'}. Pick one to open its campaigns and keywords.</p></div>
+    <div class="lhead"><div><h1>Projects</h1><p class="sub">${state.projects.length} project${state.projects.length === 1 ? '' : 's'}. Pick one to open its campaigns and keywords.${allowance('projects', 'projects you own')}</p></div>
       <button class="btn primary" id="startNew">${I('plus')} New project</button></div>
     <div class="pgrid">${state.projects.map(p => {
       const c = p.counts;
@@ -285,7 +300,7 @@ function drawSidebar() {
     <nav class="snav" aria-label="Project">
       <p class="shead">Keywords</p>
       ${item('list', 'All keywords', root, state.view === 'keywords', p.counts.total)}
-      <p class="shead">Campaigns <button class="x ed" id="addCamp" title="New campaign" aria-label="New campaign">${I('plus')}</button></p>
+      <p class="shead">Campaigns ${p.limits && p.limits.campaignsPerProject !== null ? `<small class="cnt" title="Campaigns allowed in this project">${p.campaigns.length} of ${p.limits.campaignsPerProject}</small>` : ''}<button class="x ed" id="addCamp" title="New campaign" aria-label="New campaign">${I('plus')}</button></p>
       ${p.campaigns.map(c => item('megaphone', c.name, `${root}/campaigns/${c.slug}`, state.view === 'campaign' && state.campaignId === c.id, c.counts.total)).join('') || '<p class="hint sidehint">A campaign holds the keyword uploads for one Google Ads campaign.</p>'}
       ${p.campaigns.length ? '' : `<button class="btn small outline wide ed" id="addCamp2">${I('plus')} New campaign</button>`}
       <p class="shead">Project</p>
@@ -479,9 +494,10 @@ const nums = c => `<span class="unums"><b class="priority">${c.priority}</b><b c
 function render() {
   if (state.page === 'project' && !state.project) state.page = 'projects';
   syncUrl();
-  document.querySelectorAll('.topnav a').forEach(a => a.classList.toggle('on', a.dataset.nav === state.page || (a.dataset.nav === 'projects' && ['project', 'new'].includes(state.page))));
+  document.querySelectorAll('.topnav a').forEach(a => a.classList.toggle('on', a.dataset.nav === state.page || (a.dataset.nav === 'admin' && state.page === 'admin') || (a.dataset.nav === 'projects' && ['project', 'new'].includes(state.page))));
   if (state.page === 'home') renderHome();
   else if (state.page === 'projects') renderProjects();
+  else if (state.page === 'admin') renderAdmin();
   else renderProject();
   // Back to the top only when the address changed, not after small edits on the same page.
   const here = BASE + pathFor();

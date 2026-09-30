@@ -44,6 +44,7 @@ async function startApp(user) {
   $('#main').hidden = false;
   $('#userbox').hidden = false;
   $('.topnav').hidden = false;
+  $('#adminlink').hidden = !user.isAdmin;
   $('#username').textContent = user.name;
   state.project = null;
   await refreshList();

@@ -16,7 +16,7 @@
   <header class="top">
     <div class="top-in">
       <a class="brandpill" href="%BASE%/" id="home" data-link><span data-icon="search"></span>Keyword Selector</a>
-      <nav class="topnav" hidden aria-label="Main"><a href="%BASE%/" data-link data-nav="home">Home</a><a href="%BASE%/projects" data-link data-nav="projects">Projects</a></nav>
+      <nav class="topnav" hidden aria-label="Main"><a href="%BASE%/" data-link data-nav="home">Home</a><a href="%BASE%/projects" data-link data-nav="projects">Projects</a><a href="%BASE%/admin" data-link data-nav="admin" id="adminlink" hidden>Admin</a></nav>
       <div class="top-right">
         <div class="theme" role="group" aria-label="Colour theme">
           <button type="button" data-theme="light" aria-label="Light theme"><span data-icon="sun"></span></button>
@@ -24,7 +24,7 @@
         </div>
         <details class="usermenu" id="userbox" hidden>
           <summary><span class="avatar" data-icon="user"></span><span id="username"></span><span class="chev" data-icon="down"></span></summary>
-          <div class="menu-pop"><button type="button" id="signout"><span data-icon="logout"></span>Sign out</button></div>
+          <div class="menu-pop"><button type="button" id="chpass"><span data-icon="key"></span>Change password</button><button type="button" id="signout"><span data-icon="logout"></span>Sign out</button></div>
         </details>
       </div>
     </div>
@@ -37,6 +37,7 @@
   <script src="%BASE%/app.js"></script>
   <script src="%BASE%/keywords.js"></script>
   <script src="%BASE%/business.js"></script>
+  <script src="%BASE%/admin.js"></script>
   <script src="%BASE%/auth.js"></script>
   <script src="%BASE%/boot.js"></script>
 </body>

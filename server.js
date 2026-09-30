@@ -228,7 +228,7 @@ async function authRoutes(req, res, parts, json) {
   if (sub === 'login' && req.method === 'POST') {
     const r = auth.login(await readBody(req), ip);
     res.setHeader('set-cookie', auth.cookie(r.token, auth.SESSION_MS / 1000));
-    return json({ user: r.user });
+    return json({ user: r.user, plan: plan.summaryFor(r.user.id) });
   }
   if (sub === 'logout' && req.method === 'POST') {
     auth.endSession(req);
