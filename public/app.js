@@ -4,15 +4,19 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const CATS = [['priority', 'Priority'], ['relevant', 'Relevant'], ['review', 'Review'], ['negative', 'Negative']];
 
-const state = { config: { aiEnabled: false, maxKeywords: 1000 }, projects: [], project: null, tab: 'brief', filter: 'all', search: '', sort: { key: 'score', dir: 'desc' } };
+const state = { config: { aiEnabled: false, maxKeywords: 1000, maxCompetitors: 3 }, user: null, projects: [], project: null, tab: 'brief', filter: 'all', search: '', sort: { key: 'score', dir: 'desc' }, st: { filter: 'all', search: '', sort: { key: 'cost', dir: 'desc' } } };
 
 async function api(path, opts = {}) {
   const res = await fetch('/api' + path, {
     method: opts.method || 'GET',
-    headers: opts.body ? { 'content-type': 'application/json' } : undefined,
+    headers: { 'x-csrf': '1', ...(opts.body ? { 'content-type': 'application/json' } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && !path.startsWith('/auth')) {
+    showAuth();
+    throw Object.assign(new Error('Sign in to continue.'), { auth: true });
+  }
   if (!res.ok) throw new Error(data.error || 'Request failed (' + res.status + ')');
   return data;
 }
@@ -27,7 +31,7 @@ function toast(msg, isErr) {
 }
 
 async function guard(fn) {
-  try { return await fn(); } catch (e) { toast(e.message, true); }
+  try { return await fn(); } catch (e) { if (!e.auth) toast(e.message, true); }
 }
 
 /* ---------- sidebar ---------- */
@@ -36,7 +40,8 @@ function renderSide() {
   if (!state.projects.length) { ul.innerHTML = '<li class="empty">No projects yet.</li>'; return; }
   ul.innerHTML = state.projects.map(p => {
     const meta = p.total ? `${p.total} kw, ${p.counts.priority} priority` : p.analyzed ? 'analyzed, no keywords' : 'not analyzed';
-    return `<li class="${state.project && state.project.id === p.id ? 'on' : ''}"><button data-id="${p.id}"><span class="pn">${esc(p.name)}</span><span class="pm">${esc(meta)}</span></button></li>`;
+    const who = p.role === 'owner' ? (p.shared ? ' \u00b7 shared' : '') : ' \u00b7 ' + p.role + ', ' + p.ownerName;
+    return `<li class="${state.project && state.project.id === p.id ? 'on' : ''}"><button data-id="${p.id}"><span class="pn">${esc(p.name)}</span><span class="pm">${esc(meta + who)}</span></button></li>`;
   }).join('');
 }
 
@@ -75,19 +80,35 @@ function render() {
   const title = p ? esc(p.name) : 'New project';
   const link = p && p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a>` : '';
   const analyzed = Boolean(p && p.profile);
+  const tab = (id, n, label, on, off) => `<button data-tab="${id}" class="${on ? 'on' : ''}" ${off ? 'disabled' : ''}><span class="n">${n}</span>${label}</button>`;
   main.innerHTML = `
-    <h1>${title}</h1>
-    <p class="sub">${link || 'Fill in the brief to get started.'}</p>
+    <div class="head">
+      <div><h1>${title}</h1><p class="sub">${link || 'Fill in the brief to get started.'}</p></div>
+      ${p ? `<div class="head-actions"><span class="role">${esc(p.role)}</span><button class="btn small" id="share">Share</button></div>` : ''}
+    </div>
     <nav class="steps" aria-label="Project steps">
-      <button data-tab="brief" class="${state.tab === 'brief' || state.tab === 'new' ? 'on' : ''}"><span class="n">1</span>Brief</button>
-      <button data-tab="keywords" class="${state.tab === 'keywords' ? 'on' : ''}" ${p ? '' : 'disabled'}><span class="n">2</span>Keywords${p && p.keywords.length ? ' (' + p.keywords.length + ')' : ''}</button>
-      <button data-tab="results" class="${state.tab === 'results' ? 'on' : ''}" ${p && p.keywords.length ? '' : 'disabled'}><span class="n">3</span>Results</button>
+      ${tab('brief', 1, 'Brief', state.tab === 'brief' || state.tab === 'new')}
+      ${tab('keywords', 2, 'Keywords' + (p && p.keywords.length ? ' (' + p.keywords.length + ')' : ''), state.tab === 'keywords', !p)}
+      ${tab('terms', 3, 'Search terms' + (p && p.searchTerms.length ? ' (' + p.searchTerms.length + ')' : ''), state.tab === 'terms', !analyzed)}
+      ${tab('competitors', 4, 'Competitors' + (p && p.competitors.length ? ' (' + p.competitors.length + ')' : ''), state.tab === 'competitors', !analyzed)}
+      ${tab('results', 5, 'Results', state.tab === 'results', !(p && p.keywords.length))}
     </nav>
-    <section id="pane"></section>`;
+    <section id="pane" class="${p && p.role === 'viewer' ? 'ro' : ''}"></section>`;
   main.querySelectorAll('.steps button').forEach(b => (b.onclick = () => { state.tab = b.dataset.tab; render(); }));
+  const sh = $('#share');
+  if (sh) sh.onclick = openShare;
   if (state.tab === 'brief' || state.tab === 'new') renderBrief(analyzed);
   else if (state.tab === 'keywords') renderKeywords(analyzed);
+  else if (state.tab === 'terms') renderTerms();
+  else if (state.tab === 'competitors') renderCompetitors();
   else renderResults();
+  lockIfViewer();
+}
+
+// Viewers see everything but change nothing. The server enforces this too.
+function lockIfViewer() {
+  if (!state.project || state.project.role !== 'viewer') return;
+  document.querySelectorAll('#pane textarea, #pane .sel, #pane .ed, #pane #brief input, #pane #brief button').forEach(el => (el.disabled = true));
 }
 
 function startNew() {
@@ -116,7 +137,7 @@ function renderBrief(analyzed) {
       </div>
       <div class="actions">
         <button class="btn primary" type="submit" id="save">${analyzed ? 'Save and re-analyze' : 'Save and analyze website'}</button>
-        ${p.id ? '<button class="btn danger" type="button" id="del">Delete project</button>' : ''}
+        ${p.id && p.role === 'owner' ? '<button class="btn danger" type="button" id="del">Delete project</button>' : ''}
       </div>
     </form>
     ${analyzed ? learnedHtml(p.profile) : ''}`;
@@ -188,15 +209,15 @@ function renderKeywords(analyzed) {
           <textarea id="kw-text" spellcheck="false" placeholder="One per line, or paste straight from a spreadsheet column."></textarea></div>
         <div class="counter"><span id="cnt">0 in box</span><span id="room">${p.keywords.length} saved, room for ${Math.max(0, max - p.keywords.length)} more</span></div>
         <div class="actions" style="grid-column:auto;padding-top:12px">
-          <button class="btn primary" id="add">Add keywords</button>
-          ${p.keywords.length ? '<button class="btn danger" id="clear">Remove all</button>' : ''}
+          <button class="btn primary ed" id="add">Add keywords</button>
+          ${p.keywords.length ? '<button class="btn danger ed" id="clear">Remove all</button>' : ''}
         </div>
       </div>
       <div>
         <div class="drop" id="drop">
           <p>Drop a sheet here, or pick a file.<br>CSV, TSV, TXT or XLSX.</p>
           <input type="file" id="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
-          <button class="btn" id="pick">Choose file</button>
+          <button class="btn ed" id="pick">Choose file</button>
         </div>
         <div class="aside-note">
           <p class="label">What gets read</p>
@@ -310,8 +331,8 @@ function renderResults() {
     <div class="tools">
       <div class="tabs">${tabs}</div><span class="grow"></span>
       <input type="text" class="search" id="search" placeholder="Filter keywords" value="${esc(state.search)}" aria-label="Filter keywords">
-      ${state.config.aiEnabled ? '<button class="btn small" id="ai">Ask AI about borderline ones</button>' : ''}
-      <button class="btn small" id="reset" title="Discard your manual changes and score again">Re-score</button>
+      ${state.config.aiEnabled ? '<button class="btn small ed" id="ai">Ask AI about borderline ones</button>' : ''}
+      <button class="btn small ed" id="reset" title="Discard your manual changes and score again">Re-score</button>
     </div>
     <div class="exports">
       <span class="label">Download</span>
@@ -407,11 +428,12 @@ $('#projectList').onclick = e => {
   if (b) guard(() => openProject(b.dataset.id));
 };
 $('#newProject').onclick = startNew;
+$('#signout').onclick = () => signOut();
 $('#home').onclick = e => { e.preventDefault(); state.project = null; state.tab = 'brief'; renderSide(); render(); };
 
 guard(async () => {
   state.config = await api('/config');
   $('#engine').innerHTML = state.config.aiEnabled ? '<b>AI review on</b>' : 'Offline scoring';
-  await refreshList();
-  if (state.projects.length) await openProject(state.projects[0].id); else render();
+  const me = await api('/auth/me');
+  if (me.user) await startApp(me.user); else showAuth();
 });

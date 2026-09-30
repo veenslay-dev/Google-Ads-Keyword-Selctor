@@ -14,8 +14,10 @@
   <header class="top">
     <a class="brand" href="#" id="home"><span class="mark" aria-hidden="true"></span>Keyword Sieve</a>
     <span class="engine" id="engine"></span>
+    <span class="userbox" id="userbox" hidden><span id="username"></span><button class="btn link" id="signout">Sign out</button></span>
   </header>
-  <div class="shell">
+  <div id="auth" class="authwrap" hidden></div>
+  <div class="shell" hidden>
     <aside class="side">
       <button class="btn primary wide" id="newProject">New project</button>
       <h2 class="side-h">Projects</h2>
@@ -23,7 +25,9 @@
     </aside>
     <main class="main" id="main"></main>
   </div>
+  <dialog id="shareDlg"></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="tabs.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
