@@ -5,13 +5,14 @@ function showAuth(mode = 'login') {
   state.user = null;
   state.project = null;
   clearTimeout(pollTimer);
-  $('.shell').hidden = true;
+  $('#main').hidden = true;
   $('#userbox').hidden = true;
   const box = $('#auth');
   box.hidden = false;
   const reg = mode === 'register';
   box.innerHTML = `
     <form class="authform" id="authform">
+      <span class="pill" style="align-self:flex-start">${I('search')} Keyword Selector</span>
       <h1>${reg ? 'Create your account' : 'Sign in'}</h1>
       <p class="sub">${reg ? 'Projects you create are private until you share them.' : 'Your projects and the ones shared with you.'}</p>
       ${reg ? '<div class="field"><label for="a-name">Your name</label><input type="text" id="a-name" autocomplete="name" required></div>' : ''}
@@ -39,12 +40,14 @@ function showAuth(mode = 'login') {
 async function startApp(user) {
   state.user = user;
   $('#auth').hidden = true;
-  $('.shell').hidden = false;
+  $('#main').hidden = false;
   $('#userbox').hidden = false;
   $('#username').textContent = user.name;
   state.project = null;
   await refreshList();
-  if (state.projects.length) await openProject(state.projects[0].id); else { state.view = 'keywords'; render(); }
+  let last = '';
+  try { last = localStorage.getItem('lastProject') || ''; } catch (e) { /* storage blocked */ }
+  if (last && state.projects.some(p => p.id === last)) await openProject(last); else goProjects();
 }
 
 async function signOut() {
@@ -86,9 +89,8 @@ async function openShare() {
       if (!confirm('Leave "' + p.name + '"? You will lose access until someone adds you again.')) return;
       await api(`/projects/${p.id}/leave`, { method: 'POST' }).catch(fail);
       dlg.close();
-      state.project = null; state.view = 'keywords';
       await refreshList();
-      render();
+      goProjects();
     };
   };
   draw(await api(`/projects/${p.id}/members`));

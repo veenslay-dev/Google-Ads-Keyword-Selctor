@@ -1,4 +1,4 @@
-# Keyword Sieve
+# Keyword Selector
 
 A keyword sorter for Google Ads. You describe a business and point the tool at its website, then drop in keyword files from any source. Every keyword is sorted into one of four lists:
 
@@ -30,6 +30,10 @@ Environment variables:
 - `ALLOW_SIGNUP=0` closes public sign-up once the first account exists (see Accounts)
 - `COOKIE_SECURE=1` marks the session cookie Secure. Set it whenever the app is served over HTTPS.
 - `ALLOW_PRIVATE_HOSTS=1` lets the crawler fetch localhost and private addresses. Leave it off unless you are testing.
+
+## Look and feel
+
+Crimson theme with light and dark modes. The sun and moon switch in the top bar changes it, and the choice is remembered in the browser. The app opens on a Projects page, each project has a "Back to Projects" link, and a reload returns you to the project you were in. Icons are drawn inline, so there are no icon libraries to load. The only outside resource is the Inter font from Google Fonts, and the page falls back to the system font without it.
 
 ## Daily workflow
 

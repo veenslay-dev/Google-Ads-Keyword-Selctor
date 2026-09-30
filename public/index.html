@@ -1,32 +1,38 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="base" content="%BASE%">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Keyword Sieve</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='2' y='2' fill='%231c1e1b'/%3E%3Crect width='11' height='2' y='7' fill='%231c1e1b'/%3E%3Crect width='6' height='2' y='12' fill='%231d5c43'/%3E%3C/svg%3E">
+  <title>Keyword Selector</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23d8112a'/%3E%3Ccircle cx='14' cy='14' r='6' fill='none' stroke='white' stroke-width='2.6'/%3E%3Cpath d='m19 19 6 6' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="%BASE%/style.css">
+  <script src="%BASE%/theme.js"></script>
 </head>
 <body>
   <header class="top">
-    <a class="brand" href="#" id="home"><span class="mark" aria-hidden="true"></span>Keyword Sieve</a>
-    <span class="userbox" id="userbox" hidden><span id="username"></span><button class="btn link" id="signout">Sign out</button></span>
+    <div class="top-in">
+      <a class="brandpill" href="#" id="home"><span data-icon="search"></span>Keyword Selector</a>
+      <div class="top-right">
+        <div class="theme" role="group" aria-label="Colour theme">
+          <button type="button" data-theme="light" aria-label="Light theme"><span data-icon="sun"></span></button>
+          <button type="button" data-theme="dark" aria-label="Dark theme"><span data-icon="moon"></span></button>
+        </div>
+        <details class="usermenu" id="userbox" hidden>
+          <summary><span class="avatar" data-icon="user"></span><span id="username"></span><span class="chev" data-icon="down"></span></summary>
+          <div class="menu-pop"><button type="button" id="signout"><span data-icon="logout"></span>Sign out</button></div>
+        </details>
+      </div>
+    </div>
   </header>
   <div id="auth" class="authwrap" hidden></div>
-  <div class="shell" hidden>
-    <aside class="side">
-      <button class="btn primary wide" id="newProject">New project</button>
-      <h2 class="side-h">Projects</h2>
-      <ul id="projectList" class="plist"></ul>
-    </aside>
-    <main class="main" id="main"></main>
-  </div>
+  <main class="main" id="main"></main>
   <dialog id="shareDlg"></dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="%BASE%/icons.js"></script>
   <script src="%BASE%/app.js"></script>
   <script src="%BASE%/auth.js"></script>
   <script src="%BASE%/boot.js"></script>

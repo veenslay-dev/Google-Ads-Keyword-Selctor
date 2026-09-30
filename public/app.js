@@ -13,7 +13,7 @@ const state = {
   user: null, projects: [], project: null,
   view: 'keywords', scope: 'all', filter: 'all', search: '', sort: { key: 'category', dir: 'asc' },
   up: { open: false, mode: 'files', files: [], name: '', url: '', text: '' },
-  goAfterRead: false,
+  goAfterRead: false, expanded: new Set(),
 };
 const busyAI = b => b.ai && (b.ai.status === 'running' || b.ai.status === 'queued');
 const reading = p => Boolean(p && p.analysis && p.analysis.status === 'running');
@@ -51,54 +51,134 @@ const viewer = () => state.project && state.project.role === 'viewer';
 const scopeRows = () => (state.scope === 'all' ? state.project.keywords : state.project.keywords.filter(k => k.batchId === state.scope));
 const campaignName = () => state.project.campaign || state.project.name;
 
-/* ---------- sidebar ---------- */
-function renderSide() {
-  const ul = $('#projectList');
-  if (!state.projects.length) { ul.innerHTML = '<li class="empty">No projects yet.</li>'; return; }
-  ul.innerHTML = state.projects.map(p => {
-    const bits = [p.total ? `${p.total} keywords` : p.analyzed ? 'no keywords yet' : 'not set up'];
-    if (p.role !== 'owner') bits.push(p.role + ', ' + p.ownerName); else if (p.shared) bits.push('shared');
-    return `<li class="${state.project && state.project.id === p.id ? 'on' : ''}"><button data-id="${p.id}"><span class="pn">${esc(p.name)}</span><span class="pm">${esc(bits.join(' · '))}</span></button></li>`;
-  }).join('');
-}
-
+/* ---------- projects ---------- */
 async function refreshList() {
   state.projects = await api('/projects');
-  renderSide();
 }
+
+function remember(id) { try { localStorage.setItem('lastProject', id || ''); } catch (e) { /* storage blocked */ } }
 
 async function openProject(id) {
   state.project = await api('/projects/' + id);
-  state.scope = 'all'; state.filter = 'all'; state.search = '';
+  state.scope = 'all'; state.filter = 'all'; state.search = ''; state.expanded = new Set();
   resetUpload(state.project);
   state.view = state.project.profile || reading(state.project) ? 'keywords' : 'business';
-  renderSide();
+  remember(id);
   render();
 }
 
-/* ---------- shell ---------- */
-function render() {
+function goProjects() {
+  clearTimeout(pollTimer);
+  state.project = null; state.view = 'keywords';
+  remember('');
+  render();
+}
+
+function startNew() {
+  state.project = null; state.view = 'new';
+  render();
+}
+
+const FEATURES = [
+  ['cloud', 'Upload Anywhere', 'Use files from Google Ads, Semrush, Ahrefs or any source.'],
+  ['filter', 'Smart Filtering', 'Keep only the keywords that match your business.'],
+  ['download', 'Individual Downloads', 'Each file gets its own clean, organised download.'],
+  ['calendar', 'Save Time', 'Add new keywords and repeat every day.'],
+];
+
+function heroArt() {
+  return `<svg viewBox="0 0 520 330" role="img" aria-label="Keyword files from several tools flowing into one upload">
+    <defs><linearGradient id="hg" x1="0" x2="1"><stop offset="0" stop-color="#ff5468"/><stop offset="1" stop-color="#d8112a"/></linearGradient></defs>
+    <path d="M40 210 C 80 120, 160 70, 250 60" fill="none" stroke="#d8112a" stroke-opacity=".25" stroke-width="3" stroke-dasharray="3 7" stroke-linecap="round"/>
+    <path d="M410 70 C 450 40, 480 30, 505 22" fill="none" stroke="#d8112a" stroke-opacity=".3" stroke-width="3" stroke-linecap="round"/>
+    <rect x="70" y="86" width="350" height="62" rx="31" fill="#fff" stroke="#d8112a" stroke-width="4"/>
+    <circle cx="112" cy="117" r="13" fill="none" stroke="#d8112a" stroke-width="4"/><path d="m122 127 11 11" stroke="#d8112a" stroke-width="4" stroke-linecap="round"/>
+    <rect x="152" y="110" width="180" height="14" rx="7" fill="#f3d9dc"/>
+    <g font-family="Inter, sans-serif" font-weight="700" font-size="15">
+      <rect x="110" y="34" width="86" height="40" rx="20" fill="#fff"/><text x="153" y="59" text-anchor="middle" fill="#1e2030">SEO</text>
+      <rect x="270" y="26" width="128" height="44" rx="22" fill="url(#hg)"/><text x="334" y="53" text-anchor="middle" fill="#fff">Keywords</text>
+      <rect x="110" y="168" width="156" height="46" rx="23" fill="#fff"/><circle cx="138" cy="191" r="9" fill="#2b6be0"/><text x="200" y="197" text-anchor="middle" fill="#1e2030">Google Ads</text>
+      <rect x="160" y="228" width="130" height="46" rx="23" fill="#fff"/><circle cx="188" cy="251" r="9" fill="#e38810"/><text x="242" y="257" text-anchor="middle" fill="#1e2030">Semrush</text>
+      <rect x="210" y="288" width="116" height="40" rx="20" fill="#fff"/><circle cx="236" cy="308" r="8" fill="#2b6be0"/><text x="284" y="313" text-anchor="middle" fill="#1e2030">Ahrefs</text>
+    </g>
+    <g transform="translate(345 150) rotate(6)"><rect width="130" height="150" rx="22" fill="url(#hg)"/><path d="M88 0h6l36 36v6H98a10 10 0 0 1-10-10z" fill="#fff" fill-opacity=".3"/>
+      <path d="M65 112V58M44 78l21-21 21 21" fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></g>
+  </svg>`;
+}
+
+function renderProjects() {
   const main = $('#main');
-  const p = state.project;
-  if (!p && state.view !== 'new') {
-    main.innerHTML = `<div class="welcome">
-      <h1>Sort your keywords by what you actually sell.</h1>
-      <p class="sub">Tell the tool about your business, then drop in keyword files from Google Ads, Semrush, Ahrefs or anywhere else. Each file becomes its own upload with its own download, so you can add new keywords every day.</p>
-      <button class="btn primary" id="startNew">Create your first project</button></div>`;
+  if (!state.projects.length) {
+    main.innerHTML = `
+      <section class="hero">
+        <div>
+          <span class="pill">${I('search')} Keyword Selector</span>
+          <h1>Sort your keywords by what <em>you actually sell.</em></h1>
+          <p>Tell the tool about your business, then drop in keyword files from Google Ads, Semrush, Ahrefs or anywhere else. Each file becomes its own upload with its own download, so you can add new keywords every day.</p>
+          <button class="btn primary big" id="startNew">${I('plus')} Create your first project ${I('arrow')}</button>
+        </div>
+        <div class="hero-art">${heroArt()}</div>
+      </section>
+      <section class="features">${FEATURES.map(([ic, t, d]) => `<div class="feat"><span class="fico">${I(ic)}</span><h3>${t}</h3><p>${d}</p></div>`).join('')}</section>`;
     $('#startNew').onclick = startNew;
     return;
   }
-  const link = p && p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)}</a>` : '';
   main.innerHTML = `
-    <div class="head">
-      <div><h1>${p ? esc(p.name) : 'New project'}</h1><p class="sub">${link || (p ? 'No website added yet' : 'Start with a few details about the business.')}</p></div>
-      ${p ? `<div class="head-actions"><span class="role">${esc(p.role)}</span><button class="btn small" id="share">Share</button></div>` : ''}
-    </div>
+    <div class="lhead"><div><h1>Projects</h1><p class="sub">${state.projects.length} project${state.projects.length === 1 ? '' : 's'}. Pick one to add keywords or see results.</p></div>
+      <button class="btn primary" id="startNew">${I('plus')} New project</button></div>
+    <div class="pgrid">${state.projects.map(p => {
+      const c = p.counts;
+      const who = p.role === 'owner' ? (p.shared ? 'Shared' : '') : `${p.role} · ${p.ownerName}`;
+      return `<button class="pcard" data-open="${p.id}">
+        <span class="pcard-top"><span class="pico">${I('bolt')}</span><span><h3>${esc(p.name)}</h3><span class="purl">${esc(p.url ? prettyUrl(p.url) : 'No website added')}</span></span></span>
+        <span class="ucounts">${miniBar(c)}<span class="unums"><b class="priority">${c.priority}</b><b class="relevant">${c.relevant}</b><b class="review">${c.review}</b><b class="negative">${c.negative}</b></span></span>
+        <span class="pcard-stats"><span><b>${p.total}</b> keywords</span><span><b>${p.uploads}</b> upload${p.uploads === 1 ? '' : 's'}</span>${who ? `<span class="role">${esc(who)}</span>` : ''}</span>
+      </button>`;
+    }).join('')}</div>`;
+  $('#startNew').onclick = startNew;
+  main.querySelectorAll('[data-open]').forEach(b => (b.onclick = () => guard(() => openProject(b.dataset.open))));
+}
+
+// Keywords over time: running total after each upload.
+function sparkline(p) {
+  const pts = [...p.batches].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).reduce((acc, b) => (acc.push((acc.at(-1) || 0) + b.counts.total), acc), []);
+  if (!pts.length) pts.push(0, 0); else if (pts.length === 1) pts.unshift(0);
+  const W = 150, H = 56, pad = 4, max = Math.max(...pts, 1);
+  const x = i => pad + (i / (pts.length - 1)) * (W - pad * 2);
+  const y = v => H - pad - (v / max) * (H - pad * 2 - 2);
+  const line = pts.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Keywords over time">
+    <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".22"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+    <polygon points="${x(0)},${H - pad} ${line} ${x(pts.length - 1)},${H - pad}" fill="url(#sg)"/>
+    <polyline points="${line}" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+}
+
+function statCard(p) {
+  const weekAgo = Date.now() - 7 * 864e5;
+  const week = p.batches.filter(b => new Date(b.createdAt).getTime() >= weekAgo).reduce((n, b) => n + b.counts.total, 0);
+  return `<div class="stat"><div><div class="stat-label">Total keywords</div><div class="stat-num">${p.counts.total.toLocaleString()}</div>
+    ${week ? `<span class="trend" title="Keywords added in the last 7 days">${I('trend')} +${week.toLocaleString()} this week</span>` : ''}</div>${sparkline(p)}</div>`;
+}
+
+/* ---------- project shell ---------- */
+function render() {
+  const p = state.project;
+  if (!p && state.view !== 'new') { renderProjects(); return; }
+  if (p) remember(p.id); // a reload comes back to this project
+  const main = $('#main');
+  const link = p && p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url)} ${I('external')}</a>` : `<span class="muted">${p ? 'No website added yet' : 'Start with a few details about the business'}</span>`;
+  main.innerHTML = `
+    <a href="#" class="back" id="back">${I('left')} Back to Projects</a>
+    <section class="phead">
+      <div class="pid"><span class="pico">${I('bolt')}</span><div class="ptitle"><h1>${p ? esc(p.name) : 'New project'}</h1><p class="purl">${link}</p></div></div>
+      ${p ? `<div class="pright"><div class="pbadges"><span class="role">${esc(p.role)}</span><button class="btn outline small" id="share">${I('share')} Share</button></div>${statCard(p)}</div>` : ''}
+    </section>
     <nav class="tabs2" aria-label="Project sections">
       <button data-view="keywords" class="${state.view === 'keywords' ? 'on' : ''}" ${p ? '' : 'disabled'}>Keywords${p && p.keywords.length ? `<b>${p.keywords.length}</b>` : ''}</button>
       <button data-view="business" class="${state.view !== 'keywords' ? 'on' : ''}">Business</button>
     </nav>
     <section id="pane" class="${viewer() ? 'ro' : ''}"></section>`;
+  $('#back').onclick = async e => { e.preventDefault(); await refreshList(); goProjects(); };
   main.querySelectorAll('.tabs2 button').forEach(b => (b.onclick = () => { state.view = b.dataset.view; render(); }));
   const sh = $('#share');
   if (sh) sh.onclick = openShare;
@@ -110,12 +190,7 @@ function render() {
 // Viewers see everything but change nothing. The server enforces this too.
 function lockIfViewer() {
   if (!viewer()) return;
-  document.querySelectorAll('#pane textarea, #pane .sel, #pane .ed, #pane #brief input, #pane #brief button').forEach(el => (el.disabled = true));
-}
-
-function startNew() {
-  state.project = null; state.view = 'new';
-  renderSide(); render();
+  document.querySelectorAll('#pane textarea, #pane select, #pane .ed, #pane #brief input, #pane #brief button').forEach(el => (el.disabled = true));
 }
 
 /* ---------- keywords view ---------- */
@@ -155,7 +230,7 @@ function drawNewUpload() {
   const el = $('#newup');
   const u = state.up;
   if (!u.open) {
-    el.innerHTML = `<div class="newup-closed"><button class="btn primary ed" id="openUp">New upload</button><span class="hint">Add today's keywords. Every upload is kept on its own, so earlier ones stay untouched.</span></div>`;
+    el.innerHTML = `<div class="promo"><span class="promo-ico">${I('bulb')}</span><p>Add today's keywords. Every upload is kept on its own, so earlier ones stay untouched.</p><button class="btn primary ed" id="openUp">${I('plus')} New upload</button></div>`;
     $('#openUp').onclick = () => { state.up.open = true; drawNewUpload(); lockIfViewer(); const n = $('#u-name'); if (n) n.focus(); };
     lockIfViewer();
     return;
@@ -163,7 +238,7 @@ function drawNewUpload() {
   const many = u.mode === 'files' && u.files.length > 1;
   el.innerHTML = `
     <div class="newup">
-      <div class="newup-head"><h2>New upload</h2>${p.batches.length ? '<button class="btn link" id="closeUp">Cancel</button>' : ''}</div>
+      <div class="newup-head"><h2>New upload</h2>${p.batches.length ? `<button class="x" id="closeUp" aria-label="Cancel">${I('x')}</button>` : ''}</div>
       <div class="row2">
         <div class="field"><label for="u-name">Name</label>
           <input type="text" id="u-name" class="ed" value="${esc(u.name)}" placeholder="${many ? 'Each file keeps its own name' : 'NRI property tax, 30 Sep'}" ${many ? 'disabled' : ''}>
@@ -178,13 +253,14 @@ function drawNewUpload() {
       </div>
       ${u.mode === 'files' ? `
         <div class="drop" id="drop">
-          <p>Drop files here, or <button class="btn link ed" id="pick">choose files</button></p>
+          <p><span class="fico" style="margin:0 auto 10px">${I('cloud')}</span></p>
+          <p><b>Drop files here</b>, or <button class="btn link ed" id="pick">choose files</button></p>
           <p class="hint">CSV, TSV, TXT or XLSX. Google Ads search terms reports, Keyword Planner, Semrush, Ahrefs or a plain list.</p>
           <input type="file" id="file" multiple accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
         </div>
-        ${u.files.length ? `<ul class="staged">${u.files.map((f, i) => `<li><span>${esc(f.name)}</span><span class="hint">${sizeOf(f.size)}</span><button class="x ed" data-rmfile="${i}" aria-label="Remove ${esc(f.name)}">&times;</button></li>`).join('')}</ul>` : ''}`
+        ${u.files.length ? `<ul class="staged">${u.files.map((f, i) => `<li><span>${esc(f.name)}</span><span class="hint">${sizeOf(f.size)}</span><button class="x ed" data-rmfile="${i}" aria-label="Remove ${esc(f.name)}">${I('x')}</button></li>`).join('')}</ul>` : ''}`
       : `<div class="field"><label for="u-text" class="sr">Keywords</label><textarea id="u-text" class="ed" spellcheck="false" rows="7" placeholder="One per line, or paste straight from a spreadsheet column.">${esc(u.text)}</textarea></div>`}
-      <div class="actions"><button class="btn primary ed" id="u-go">${state.config.aiEnabled ? 'Add and analyse' : 'Add keywords'}</button><span class="hint" id="u-info"></span></div>
+      <div class="actions"><button class="btn primary ed" id="u-go">${I('plus')} ${state.config.aiEnabled ? 'Add and analyse' : 'Add keywords'}</button><span class="hint" id="u-info"></span></div>
     </div>`;
 
   const save = () => { const n = $('#u-name'), l = $('#u-url'), t = $('#u-text'); if (n && !n.disabled) u.name = n.value; if (l) u.url = l.value; if (t) u.text = t.value; };
@@ -210,7 +286,7 @@ async function submitUpload() {
   if (u.mode === 'files' && !u.files.length) return toast('Choose at least one file first.', true);
   if (u.mode === 'paste' && !u.text.trim()) return toast('Paste some keywords first.', true);
   const btn = $('#u-go');
-  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Adding...';
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Adding...';
   const msgs = [];
   let last = null, failures = 0;
   const jobs = u.mode === 'files' ? u.files.map(f => ({ label: f.name, get: () => readSheetFile(f), name: u.files.length === 1 ? u.name : '', filename: f.name })) : [{ label: u.name || 'Pasted keywords', get: async () => u.text, name: u.name, filename: '' }];
@@ -252,21 +328,22 @@ const miniBar = c => {
   const t = c.total || 1;
   return `<span class="mbar" aria-hidden="true">${CATS.map(([k]) => `<i class="${k}" style="width:${(c[k] / t) * 100}%"></i>`).join('')}</span>`;
 };
+const nums = c => `<span class="unums"><b class="priority">${c.priority}</b><b class="relevant">${c.relevant}</b><b class="review">${c.review}</b><b class="negative">${c.negative}</b></span>`;
 
-function aiStatus(b) {
+function statusPill(b) {
   const a = b.ai || {};
   const note = a.note ? `<span class="ainote" title="${esc(a.note)}">${esc(a.note)}</span>` : '';
   if (a.status === 'running' || a.status === 'queued') {
-    if (a.status === 'queued') return '<span class="ai">Waiting in line</span>';
-    if (a.stage === 'page') return '<span class="ai running">Reading the landing page</span>';
+    if (a.status === 'queued') return '<span class="spill">Waiting in line</span>';
+    if (a.stage === 'page') return '<span class="spill run"><span class="spin"></span> Reading the landing page</span>';
     const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
-    return `<span class="ai running">Analysing ${a.done || 0} of ${a.total || 0}</span><span class="prog"><i style="width:${pct}%"></i></span>`;
+    return `<span class="spill run"><span class="spin"></span> Analysing ${a.done || 0} of ${a.total || 0}</span><span class="prog"><i style="width:${pct}%"></i></span>`;
   }
-  if (a.status === 'done') return (b.stale ? '<span class="ai stale" title="The business details changed after this was analysed.">Out of date</span>' : '<span class="ai ok">Analysed</span>') + note;
-  if (a.status === 'error') return '<span class="ai bad">Analysis failed</span>' + note;
-  if (a.status === 'interrupted') return '<span class="ai bad">Analysis stopped</span>' + note;
-  if (a.status === 'waiting' && state.config.aiEnabled) return `<span class="ai">${reading(state.project) ? 'Waiting for the website' : 'Waiting for business details'}</span>`;
-  return '<span class="ai muted">Basic sorting</span>';
+  if (a.status === 'done') return (b.stale ? `<span class="spill stale" title="The business details changed after this was analysed.">Out of date</span>` : `<span class="spill ok">${I('check')} Analysed</span>`) + note;
+  if (a.status === 'error') return '<span class="spill bad">Analysis failed</span>' + note;
+  if (a.status === 'interrupted') return '<span class="spill bad">Analysis stopped</span>' + note;
+  if (a.status === 'waiting' && state.config.aiEnabled) return `<span class="spill">${reading(state.project) ? 'Waiting for the website' : 'Waiting for business details'}</span>`;
+  return '<span class="spill">Basic sorting</span>';
 }
 
 function dlHref(type, batch, campaign) {
@@ -286,33 +363,36 @@ function drawFiles() {
   if (!p.batches.length) { el.innerHTML = ''; return; }
   const all = p.counts;
   const stale = p.batches.filter(b => b.stale);
+  const fmtDate = d => new Date(d).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const rows = [...p.batches].reverse().map(b => {
     const c = b.counts;
-    const when = new Date(b.createdAt).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-    return `<li class="file ${state.scope === b.id ? 'on' : ''}" data-id="${b.id}">
-      <button class="file-main" data-select="${b.id}" aria-pressed="${state.scope === b.id}"><span class="fname">${esc(b.name)}</span><span class="fmeta">${esc(b.kind)} · ${c.total} keyword${c.total === 1 ? '' : 's'} · ${esc(when)}${pageLine(b)}</span></button>
-      <span class="fcounts">${miniBar(c)}<span class="fnums"><b class="priority">${c.priority}</b> <b class="relevant">${c.relevant}</b> <b class="review">${c.review}</b> <b class="negative">${c.negative}</b></span></span>
-      <span class="fstat">${aiStatus(b)}</span>
-      <details class="menu"><summary aria-label="Actions for ${esc(b.name)}">⋯</summary>
+    const kind = b.kind === 'Keyword list' ? '' : esc(b.kind) + ' · ';
+    return `<li class="urow ${state.scope === b.id ? 'on' : ''}" data-id="${b.id}">
+      <button class="umain" data-select="${b.id}" aria-pressed="${state.scope === b.id}"><span class="uico">${I('file')}</span>
+        <span class="utext"><span class="uname">${esc(b.name)}</span><span class="umeta">${kind}${c.total} keyword${c.total === 1 ? '' : 's'} · Uploaded on ${esc(fmtDate(b.createdAt))}${pageLine(b)}</span></span></button>
+      <span class="ucounts">${miniBar(c)}${nums(c)}</span>
+      <span class="ustat">${statusPill(b)}</span>
+      <details class="menu"><summary aria-label="Actions for ${esc(b.name)}">${I('dots')}</summary>
         <div class="menu-pop">
-          <a href="${dlHref('ads-targeting', b.id, campaignName())}">Download keywords to target</a>
-          <a href="${dlHref('ads-negatives', b.id, campaignName())}">Download negative keywords</a>
-          <a href="${dlHref('all', b.id, campaignName())}">Download everything (CSV)</a>
+          <a href="${dlHref('ads-targeting', b.id, campaignName())}">${I('download')} Download keywords to target</a>
+          <a href="${dlHref('ads-negatives', b.id, campaignName())}">${I('download')} Download negative keywords</a>
+          <a href="${dlHref('all', b.id, campaignName())}">${I('download')} Download everything (CSV)</a>
           <hr>
-          ${state.config.aiEnabled ? `<button class="ed" data-recheck="${b.id}">Analyse again</button>` : ''}
-          <button class="ed" data-rename="${b.id}">Rename</button>
-          <button class="ed" data-page="${b.id}">${b.pageUrl ? 'Change landing page' : 'Set landing page'}</button>
-          <button class="ed danger" data-delete="${b.id}">Delete this upload</button>
+          ${state.config.aiEnabled ? `<button class="ed" data-recheck="${b.id}">${I('trend')} Analyse again</button>` : ''}
+          <button class="ed" data-rename="${b.id}">${I('file')} Rename</button>
+          <button class="ed" data-page="${b.id}">${I('globe')} ${b.pageUrl ? 'Change landing page' : 'Set landing page'}</button>
+          <button class="ed danger" data-delete="${b.id}">${I('x')} Delete this upload</button>
         </div></details>
     </li>`;
   }).join('');
   el.innerHTML = `<div class="sect-head"><h2>Uploads</h2><span class="muted">${p.batches.length} file${p.batches.length === 1 ? '' : 's'}, ${all.total} keywords</span>
-      ${stale.length && state.config.aiEnabled ? `<button class="btn small ed right" id="restale">Analyse ${stale.length} out-of-date upload${stale.length === 1 ? '' : 's'} again</button>` : ''}</div>
-    <ul class="files">
-      <li class="file all ${state.scope === 'all' ? 'on' : ''}"><button class="file-main" data-select="all" aria-pressed="${state.scope === 'all'}"><span class="fname">All uploads together</span><span class="fmeta">${all.total} keywords</span></button>
-        <span class="fcounts">${miniBar(all)}<span class="fnums"><b class="priority">${all.priority}</b> <b class="relevant">${all.relevant}</b> <b class="review">${all.review}</b> <b class="negative">${all.negative}</b></span></span><span class="fstat"></span><span></span></li>
+      ${stale.length && state.config.aiEnabled ? `<button class="btn outline small ed right" id="restale">Analyse ${stale.length} out-of-date upload${stale.length === 1 ? '' : 's'} again</button>` : ''}</div>
+    <ul class="ucard">
+      <li class="urow ${state.scope === 'all' ? 'on' : ''}"><button class="umain" data-select="all" aria-pressed="${state.scope === 'all'}"><span class="uico all">${I('file')}</span>
+        <span class="utext"><span class="uname">All uploads together</span><span class="umeta">${all.total} keywords</span></span></button>
+        <span class="ucounts">${miniBar(all)}${nums(all)}</span><span class="ustat"></span><span></span></li>
       ${rows}</ul>
-    <p class="legend"><b class="priority">Priority</b> <b class="relevant">Relevant</b> <b class="review">Review</b> <b class="negative">Negative</b></p>`;
+    <div class="legend"><span class="priority"><i></i>Priority</span><span class="relevant"><i></i>Relevant</span><span class="review"><i></i>Review</span><span class="negative"><i></i>Negative</span></div>`;
 
   el.querySelectorAll('[data-select]').forEach(b => (b.onclick = () => { state.scope = b.dataset.select; state.filter = 'all'; drawFiles(); drawResults(); }));
   el.querySelectorAll('[data-rename]').forEach(b => (b.onclick = () => {
@@ -331,7 +411,7 @@ function drawFiles() {
     guard(async () => {
       state.project = await api(`/projects/${p.id}/uploads/${batch.id}`, { method: 'DELETE' });
       if (state.scope === batch.id) state.scope = 'all';
-      await refreshList(); drawFiles(); drawResults();
+      await refreshList(); render();
     });
   }));
   el.querySelectorAll('[data-recheck]').forEach(b => (b.onclick = () => guard(async () => {
@@ -348,7 +428,7 @@ function drawFiles() {
 
 // Close any open file menu or download panel when clicking elsewhere.
 document.addEventListener('click', e => {
-  document.querySelectorAll('details.menu[open], details.dl[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
+  document.querySelectorAll('details.menu[open], details.dl[open], details.usermenu[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
 });
 
 /* ---------- results ---------- */
@@ -365,11 +445,14 @@ function sortedRows(rows) {
   });
 }
 
+const CAT_ICON = { priority: 'up', relevant: 'circlecheck', review: 'eye', negative: 'ban' };
+const DECIDED = { ai: 'Analysis', rules: 'Basic rules', performance: 'Campaign results', you: 'You' };
+
 function drawResults() {
   const p = state.project;
   const el = $('#results');
   if (!p.keywords.length) {
-    el.innerHTML = p.batches.length ? '' : '<div class="empty-state"><b>No keywords yet.</b><br>Add a file or paste a list above and the results appear here.</div>';
+    el.innerHTML = p.batches.length ? '' : `<div class="card empty-state"><b>No keywords yet.</b><br>Add a file or paste a list above and the results appear here.</div>`;
     return;
   }
   const base = scopeRows();
@@ -380,16 +463,15 @@ function drawResults() {
   const rows = sortedRows(base.filter(k => (state.filter === 'all' || k.category === state.filter) && (!q || k.keyword.toLowerCase().includes(q))));
   const has = f => base.some(k => k[f] != null);
   const metrics = [['volume', 'Searches'], ['clicks', 'Clicks'], ['cost', 'Cost'], ['conversions', 'Conv.']].filter(([f]) => has(f));
-  const showFile = state.scope === 'all' && p.batches.length > 1;
-  const showService = has('service');
-  const cols = [['keyword', 'Keyword'], ['category', 'Category'], ['confidence', 'Confidence'], ['intent', 'Intent'], ...(showService ? [['service', 'Service']] : []), ...metrics.map(([f, l]) => [f, l, 1]), ['reason', 'Why']];
-  const bn = new Map(p.batches.map(b => [b.id, b.name]));
+  const cols = [['keyword', 'Keyword'], ['category', 'Category'], ['confidence', 'Confidence'], ['intent', 'Intent'], ...metrics.map(([f, l]) => [f, l, 1]), ['reason', 'Why']];
+  const bn = new Map(p.batches.map(b => [b.id, b]));
   const ps = p.perfSummary;
   const campaign = campaignName();
+  const colCount = cols.length + 1;
 
   el.innerHTML = `
     <div class="sect-head"><h2>${batch ? esc(batch.name) : 'All uploads'}</h2>
-      <details class="dl"><summary class="btn">Download</summary>
+      <details class="dl"><summary class="btn">${I('download')} Download</summary>
         <div class="dlpanel">
           <label for="camp">Campaign name for Google Ads Editor</label>
           <input type="text" id="camp" value="${esc(campaign)}" class="ed">
@@ -400,21 +482,19 @@ function drawResults() {
           <a data-dl="priority">Priority only</a><a data-dl="relevant">Relevant only</a><a data-dl="review">Review only</a><a data-dl="negative">Negative only</a><a data-dl="all">Everything</a>
         </div></details></div>
     ${ps ? `<p class="perf">From your campaign results: <b>${fmt(ps.totalClicks)}</b> clicks, <b>${fmt(ps.totalCost)}</b> spent, <b>${ps.convRate}%</b> convert${ps.wasteCount ? `. <b class="negative">${fmt(ps.wasteCost)}</b> went on ${ps.wasteCount} keyword${ps.wasteCount === 1 ? '' : 's'} now marked negative` : ''}${ps.winners ? `, and ${ps.winners} converting keyword${ps.winners === 1 ? '' : 's'} are marked priority` : ''}.</p>` : ''}
-    <div class="bar" role="img" aria-label="Split by category">${CATS.map(([k]) => `<i class="${k}" style="width:${(c[k] / (c.all || 1)) * 100}%"></i>`).join('')}</div>
     <div class="tools">
-      <div class="tabs">${[['all', 'All'], ...CATS].map(([k, l]) => `<button data-f="${k}" class="${state.filter === k ? 'on' : ''}">${k === 'all' ? '' : `<span class="dot" style="background:var(--${k})"></span>`}${l}<b>${c[k]}</b></button>`).join('')}</div>
-      <span class="grow"></span>
-      <input type="text" class="search" id="search" placeholder="Search keywords" value="${esc(state.search)}" aria-label="Search keywords">
+      <div class="fpills">${[['all', 'All'], ...CATS].map(([k, l]) => `<button data-f="${k}" class="${state.filter === k ? 'on' : ''}">${k === 'all' ? '' : `<span class="dot ${k}"></span>`}${l} <b>${c[k]}</b></button>`).join('')}</div>
+      <div class="searchbox">${I('search')}<input type="text" id="search" placeholder="Search keywords..." value="${esc(state.search)}" aria-label="Search keywords"></div>
     </div>
     <div class="tablewrap"><table>
-      <thead><tr>${cols.map(([k, l, n]) => `<th data-k="${k}" class="${n ? 'num' : ''}" ${state.sort.key === k ? `data-dir="${state.sort.dir}"` : ''}>${l}</th>`).join('')}<th></th></tr></thead>
+      <thead><tr>${cols.map(([k, l, n]) => `<th data-k="${k}" class="${n ? 'num' : ''}" ${state.sort.key === k ? `data-dir="${state.sort.dir}"` : ''}>${l}</th>`).join('')}<th class="nosort"></th></tr></thead>
       <tbody id="rows"></tbody></table></div>
-    <details class="extras"><summary>Suggested account-level negative words</summary>
-      <p class="sub">Words that keep turning up in your negatives and never in your site. Good candidates for a shared negative list.</p>
+    <details class="extras"><summary>${I('right')} Suggested account-level negative words</summary>
+      <p class="sub">Words that keep turning up in your negatives and never on your site. Good candidates for a shared negative list.</p>
       <div class="chips">${(p.negativeWords || []).map(w => `<span class="chip neg">${esc(w.word)}<small>${w.count}</small></span>`).join('') || '<span class="sub">Nothing repeats yet.</span>'}</div>
-      ${(p.negativeWords || []).length ? '<p><a class="btn small" data-dl="negative-words">Download as a negative list</a></p>' : ''}
+      ${(p.negativeWords || []).length ? `<p><a class="btn small" data-dl="negative-words">${I('download')} Download as a negative list</a></p>` : ''}
     </details>
-    <details class="extras"><summary>Ad group ideas</summary>
+    <details class="extras"><summary>${I('right')} Ad group ideas</summary>
       <p class="sub">Priority and relevant keywords grouped by their strongest shared term. A starting point, not a final structure.</p>
       ${(p.adGroups || []).map(g => `<details class="ag"><summary>${esc(g.name)}<span>${g.ids.length}</span></summary><div>${g.ids.map(id => esc((p.keywords.find(k => k.id === id) || {}).keyword)).join(', ')}</div></details>`).join('') || '<span class="sub">No priority or relevant keywords yet.</span>'}
     </details>`;
@@ -424,22 +504,36 @@ function drawResults() {
   $('#camp').oninput = setLinks;
   $('#camp').onchange = e => guard(() => api('/projects/' + p.id, { method: 'PUT', body: { campaign: e.target.value } }));
 
+  const detail = k => {
+    const b = bn.get(k.batchId);
+    const items = [
+      ['Matched service', k.service], ['Suggested match type', k.matchType], ['Decided by', DECIDED[k.source]],
+      ['Confidence', k.source === 'ai' && k.confidence != null ? k.confidence + '%' : ''], ['Intent', k.intent], ['Upload', b && b.name],
+      ['Landing page', b && b.pageUrl ? prettyUrl(b.pageUrl) : ''], ['Searches a month', fmt(k.volume)], ['Suggested bid', fmt(k.bid)], ['Competition', k.competition],
+      ['Impressions', fmt(k.impressions)], ['Clicks', fmt(k.clicks)], ['Cost', fmt(k.cost)], ['Conversions', fmt(k.conversions)],
+    ].filter(([, v]) => v !== '' && v != null);
+    return `<dl class="dgrid">${items.map(([t, v]) => `<div><dt>${t}</dt><dd>${esc(v)}</dd></div>`).join('')}
+      <div class="wide"><dt>Why</dt><dd>${esc([k.reason, k.note].filter(Boolean).join('. ') || 'No reason recorded')}</dd></div></dl>`;
+  };
+
   const body = $('#rows');
-  const colCount = cols.length + 1;
-  const tag = k => (showFile ? `<span class="ftag">${esc(bn.get(k.batchId) || '')}</span>` : '');
-  body.innerHTML = rows.length ? rows.slice(0, 1500).map(k => `<tr data-id="${k.id}">
-      <td class="kw">${esc(k.keyword)}${tag(k)}</td>
-      <td>${k.category ? `<select class="sel ${k.category}" aria-label="Category for ${esc(k.keyword)}">${CATS.map(([v, l]) => `<option value="${v}" ${k.category === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : '<span class="mt">unsorted</span>'}</td>
+  body.innerHTML = rows.length ? rows.slice(0, 1500).map(k => {
+    const open = state.expanded.has(k.id);
+    const sub = [state.scope === 'all' && bn.get(k.batchId) ? bn.get(k.batchId).name : '', k.service].filter(Boolean).join(' · ');
+    return `<tr class="kwrow" data-id="${k.id}">
+      <td class="kw"><div class="kwcell"><button class="twisty ${open ? 'open' : ''}" data-tw="${k.id}" aria-expanded="${open}" aria-label="Details for ${esc(k.keyword)}">${I('right')}</button>
+        <div><span class="kwtext">${esc(k.keyword)}</span>${sub ? `<span class="kwsub">${esc(sub)}</span>` : ''}</div></div></td>
+      <td>${k.category ? `<label class="catpill ${k.category}">${I(CAT_ICON[k.category])}<select aria-label="Category for ${esc(k.keyword)}">${CATS.map(([v, l]) => `<option value="${v}" ${k.category === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : '<span class="mt">unsorted</span>'}</td>
       <td class="conf-td">${confCell(k)}</td>
       <td class="intent">${esc(k.intent || '')}</td>
-      ${showService ? `<td class="svc">${esc(k.service || '')}</td>` : ''}
       ${metrics.map(([f]) => `<td class="num">${fmt(k[f])}</td>`).join('')}
-      <td class="why" title="${esc([k.reason, k.note].filter(Boolean).join('. '))}">${esc(k.reason || '')}${k.note ? `<span class="note">${esc(k.note)}</span>` : ''}</td>
-      <td><button class="x ed" title="Remove keyword" aria-label="Remove ${esc(k.keyword)}">&times;</button></td></tr>`).join('') +
-    (rows.length > 1500 ? `<tr><td colspan="${colCount}" class="empty-state">Showing the first 1500 of ${rows.length}. Use the filters to narrow it down.</td></tr>` : '')
+      <td class="why">${esc(k.reason || '')}${k.note ? `<span class="note">${esc(k.note)}</span>` : ''}</td>
+      <td><button class="x ed" title="Remove keyword" aria-label="Remove ${esc(k.keyword)}">${I('x')}</button></td></tr>
+      ${open ? `<tr class="detail"><td colspan="${colCount}">${detail(k)}</td></tr>` : ''}`;
+  }).join('') + (rows.length > 1500 ? `<tr><td colspan="${colCount}" class="empty-state">Showing the first 1500 of ${rows.length}. Use the filters to narrow it down.</td></tr>` : '')
     : `<tr><td colspan="${colCount}" class="empty-state">Nothing matches this filter.</td></tr>`;
 
-  el.querySelectorAll('.tabs button').forEach(b => (b.onclick = () => { state.filter = b.dataset.f; drawResults(); }));
+  el.querySelectorAll('.fpills button').forEach(b => (b.onclick = () => { state.filter = b.dataset.f; drawResults(); }));
   el.querySelectorAll('th[data-k]').forEach(th => (th.onclick = () => {
     const k = th.dataset.k;
     state.sort = { key: k, dir: state.sort.key === k && state.sort.dir === 'asc' ? 'desc' : 'asc' };
@@ -449,15 +543,20 @@ function drawResults() {
     state.search = e.target.value;
     const pos = e.target.selectionStart;
     drawResults();
-    const s = $('#search'); s.focus(); s.setSelectionRange(pos, pos);
+    const sb = $('#search'); sb.focus(); sb.setSelectionRange(pos, pos);
   };
+  body.querySelectorAll('[data-tw]').forEach(b => (b.onclick = () => {
+    const id = b.dataset.tw;
+    if (state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+    drawResults();
+  }));
   body.querySelectorAll('select').forEach(sel => (sel.onchange = () => guard(async () => {
     state.project = await api(`/projects/${p.id}/keyword/${sel.closest('tr').dataset.id}`, { method: 'PATCH', body: { category: sel.value } });
     await refreshList(); drawFiles(); drawResults();
   })));
   body.querySelectorAll('.x').forEach(btn => (btn.onclick = () => guard(async () => {
     state.project = await api(`/projects/${p.id}/keyword/${btn.closest('tr').dataset.id}`, { method: 'DELETE' });
-    await refreshList(); drawFiles(); drawResults();
+    await refreshList(); render();
   })));
   lockIfViewer();
 }
@@ -549,7 +648,7 @@ function renderBusiness() {
   const busy = reading(state.project);
   $('#pane').innerHTML = `
     <div id="banner"></div>
-    <form class="form" id="brief" autocomplete="off">
+    <div class="formcard"><form class="form" id="brief" autocomplete="off">
       <div class="field"><label for="f-name">Project name</label><input type="text" id="f-name" value="${esc(p.name)}" required placeholder="Dinesh Aarjav, NRI tax"></div>
       <div class="field"><label for="f-url">Website</label><input type="text" id="f-url" value="${esc(p.url)}" placeholder="example.com"><span class="hint">Up to ${state.config.maxPages} pages are read, starting from this one. The text is stored and used to understand your services.</span></div>
       <div class="field full"><label for="f-desc">About the business</label><textarea id="f-desc" placeholder="Who you are, who buys from you, what makes you different.">${esc(p.description)}</textarea></div>
@@ -567,7 +666,7 @@ function renderBusiness() {
         ${analyzed ? '<button class="btn" type="button" id="saveOnly">Save without re-reading</button>' : ''}
         ${p.id && p.role === 'owner' ? '<span class="grow"></span><button class="btn danger" type="button" id="del">Delete project</button>' : ''}
       </div>
-    </form>
+    </form></div>
     ${analyzed ? learnedHtml(p.profile) : ''}
     ${p.id ? competitorsHtml(p) : ''}
     ${state.config.aiEnabled ? '' : '<p class="hint footnote">Smart analysis is not switched on for this server, so keywords are sorted by basic rules only.</p>'}`;
@@ -581,10 +680,10 @@ function renderBusiness() {
     e.preventDefault();
     const btn = $('#save');
     btn.disabled = true;
-    btn.innerHTML = '<span class="spin"></span>Starting...';
+    btn.innerHTML = '<span class="spin"></span> Starting...';
     guard(async () => {
       try {
-        if (!state.project) { state.project = await api('/projects', { method: 'POST', body: body() }); state.view = 'business'; renderSide(); }
+        if (!state.project) { state.project = await api('/projects', { method: 'POST', body: body() }); state.view = 'business'; }
         state.project = await api('/projects/' + state.project.id + '/analyze', { method: 'POST', body: body() });
         state.goAfterRead = true;
         await refreshList();
@@ -631,7 +730,7 @@ function learnedHtml(pr) {
 function competitorsHtml(p) {
   const comps = p.competitors.map(c => `<li>
       <span><b>${esc(c.name)}</b> <span class="pm">${esc(c.host)}</span><br><span class="pm">${c.pages.length} page${c.pages.length === 1 ? '' : 's'} read${c.errors.length ? ', ' + c.errors.length + ' failed' : ''}</span></span>
-      <button class="x ed" data-rm="${c.id}" aria-label="Remove ${esc(c.name)}">&times;</button></li>`).join('');
+      <button class="x ed" data-rm="${c.id}" aria-label="Remove ${esc(c.name)}">${I('x')}</button></li>`).join('');
   const brands = p.brands.map(b => `<button class="chip brand ${b.enabled ? '' : 'off'} ed" data-b="${esc(b.phrase)}" aria-pressed="${b.enabled}" title="${esc('From ' + b.competitor + '. Click to ' + (b.enabled ? 'stop blocking' : 'block again'))}">${esc(b.phrase)}</button>`).join('');
   const gaps = (p.gaps || []).map((g, i) => `<li><label><input type="checkbox" class="ed" data-i="${i}"> <b>${esc(g.phrase)}</b></label> <span class="pm">${g.competitors.map(esc).join(', ')}</span></li>`).join('');
   return `<div class="competitors" id="competitors">
@@ -662,7 +761,7 @@ function wireCompetitors() {
   const pane = $('#pane');
   $('#c-go').onclick = () => {
     const btn = $('#c-go');
-    btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Reading sites...';
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Reading sites...';
     guard(async () => {
       try {
         const r = await api(`/projects/${p.id}/competitors`, { method: 'POST', body: { urls: $('#c-urls').value } });

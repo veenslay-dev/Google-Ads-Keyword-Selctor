@@ -1,12 +1,13 @@
 'use strict';
 
-$('#projectList').onclick = e => {
-  const b = e.target.closest('button[data-id]');
-  if (b) guard(() => openProject(b.dataset.id));
+paintIcons();
+document.querySelectorAll('.theme button').forEach(b => (b.onclick = () => setTheme(b.dataset.theme)));
+setTheme(document.documentElement.dataset.theme);
+$('#signout').onclick = () => { $('#userbox').open = false; signOut(); };
+$('#home').onclick = e => {
+  e.preventDefault();
+  if (state.user) guard(async () => { await refreshList(); goProjects(); });
 };
-$('#newProject').onclick = startNew;
-$('#signout').onclick = () => signOut();
-$('#home').onclick = e => { e.preventDefault(); if (state.user) { state.project = null; state.view = 'keywords'; renderSide(); render(); } };
 
 guard(async () => {
   state.config = await api('/config');

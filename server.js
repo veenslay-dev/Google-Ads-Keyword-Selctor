@@ -508,7 +508,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
-  server.listen(PORT, () => console.log(`Keyword Sieve running on http://localhost:${PORT}` + (openai.enabled() ? ' (OpenAI review on, model ' + openai.model() + ')' : ' (rules only, no OPENAI_API_KEY set)')));
+  server.listen(PORT, () => console.log(`Keyword Selector running on http://localhost:${PORT}` + (openai.enabled() ? ' (OpenAI review on, model ' + openai.model() + ')' : ' (rules only, no OPENAI_API_KEY set)')));
 }
 
 module.exports = server;
