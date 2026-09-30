@@ -47,7 +47,7 @@ h3 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
 
 /* top bar */
 .top { background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 30; }
-.top-in { max-width: 1120px; margin: 0 auto; height: 60px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.top-in { max-width: 1240px; margin: 0 auto; height: 60px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .brandpill { display: inline-flex; align-items: center; gap: 9px; background: var(--brand-tint); color: var(--brand); padding: 8px 16px; border-radius: 999px; font-weight: 600; text-decoration: none; }
 .top-right { display: flex; align-items: center; gap: 14px; }
 .theme { display: inline-flex; background: var(--soft); border-radius: 999px; padding: 3px; }
@@ -64,7 +64,7 @@ details.usermenu summary::-webkit-details-marker { display: none; }
 .menu-pop hr { border: 0; border-top: 1px solid var(--line); margin: 5px 0; }
 .menu-pop .danger { color: var(--negative); }
 
-.main { max-width: 1120px; margin: 0 auto; padding: 26px 24px 90px; min-width: 0; }
+.main { max-width: 1240px; margin: 0 auto; padding: 26px 24px 90px; min-width: 0; }
 
 /* buttons and fields */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 9px 18px; border-radius: 10px; cursor: pointer; text-decoration: none; font-weight: 600; line-height: 1.3; }
@@ -346,4 +346,82 @@ textarea:disabled, input[type=text]:disabled { opacity: .7; }
   .dlpanel { right: auto; left: 0; }
   .features { grid-template-columns: 1fr; } .feat { border-right: 0; border-bottom: 1px solid var(--line); } .feat:last-child { border-bottom: 0; }
   .dgrid { grid-template-columns: 1fr 1fr; } tr.detail td { padding-left: 16px; }
+}
+
+/* top navigation */
+.topnav { display: flex; gap: 6px; margin-left: 20px; flex: 1; }
+.topnav a { padding: 8px 14px; border-radius: 999px; color: var(--muted); text-decoration: none; font-weight: 600; }
+.topnav a:hover { color: var(--ink); background: var(--soft); }
+.topnav a.on { color: var(--brand); background: var(--brand-tint); }
+.hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.hero-actions .btn .count { background: var(--brand-tint); color: var(--brand); border-radius: 999px; padding: 0 9px; font-size: 12px; }
+a.pcard { color: inherit; text-decoration: none; }
+a.btn { text-decoration: none; }
+
+/* project layout with a sidebar */
+.layout { display: grid; grid-template-columns: 272px minmax(0, 1fr); gap: 32px; align-items: start; }
+.layout.nosid { grid-template-columns: minmax(0, 1fr); }
+.content { min-width: 0; }
+.side { position: sticky; top: 84px; align-self: start; max-height: calc(100vh - 100px); overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 14px 16px; }
+.side .back { margin: 0 0 14px 6px; font-size: 13px; }
+.sid { display: flex; gap: 12px; align-items: center; padding: 6px 6px 16px; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.pico.sm { width: 40px; height: 40px; border-radius: 11px; font-size: 20px; box-shadow: none; }
+.sidtext { min-width: 0; display: flex; flex-direction: column; }
+.sidtext b { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidtext .purl { font-size: 12px; color: var(--muted); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; max-width: 180px; margin: 0; }
+.snav { display: flex; flex-direction: column; gap: 2px; }
+.shead { display: flex; align-items: center; justify-content: space-between; margin: 16px 8px 4px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.shead .x { padding: 2px 6px; font-size: 15px; color: var(--brand); background: var(--brand-tint); border-radius: 8px; }
+.shead .x:hover { background: var(--brand); color: var(--on-brand); }
+.sitem { display: flex; align-items: center; gap: 11px; padding: 9px 10px; border-radius: 10px; color: var(--ink); text-decoration: none; font-weight: 500; }
+.sitem .ico { color: var(--muted); font-size: 18px; }
+.sitem span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sitem b { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--soft); border-radius: 999px; padding: 1px 9px; }
+.sitem:hover { background: var(--soft); }
+.sitem.on { background: var(--brand-tint); color: var(--brand); font-weight: 600; }
+.sitem.on .ico { color: var(--brand); }
+.sitem.on b { background: var(--card); color: var(--brand); }
+.sidehint { margin: 2px 10px 10px; }
+.snav .btn.wide { margin: 8px 4px 0; width: calc(100% - 8px); }
+
+/* page header inside a project */
+.content .phead { margin-bottom: 24px; align-items: flex-start; }
+.content .phead .sub { margin: 6px 0 0; }
+.content .pid .pico { width: 56px; height: 56px; font-size: 26px; }
+.phead .pright { align-items: flex-end; }
+.phead details.menu summary { width: 34px; height: 34px; }
+.content .stat { grid-template-columns: auto 130px; }
+.competitors { margin-top: 0; }
+.card.empty-state { display: grid; gap: 14px; justify-items: center; }
+
+/* dialog form */
+#modal .dlg { display: block; }
+#modal .actions { margin-top: 16px; }
+
+@media (max-width: 960px) {
+  .layout { grid-template-columns: 1fr; gap: 20px; }
+  .side { position: static; max-height: none; }
+  .snav { flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .shead { flex-basis: 100%; margin: 12px 4px 2px; }
+  .sitem { padding: 7px 12px; background: var(--soft); border-radius: 999px; }
+  .snav .btn.wide { width: auto; margin: 0; }
+  .sidehint { flex-basis: 100%; }
+  .topnav { margin-left: 8px; }
+}
+@media (max-width: 760px) {
+  .topnav a { padding: 7px 10px; font-size: 13px; }
+  .brandpill { padding: 7px 12px; font-size: 13px; }
+  .content .phead { flex-direction: column; }
+  .phead .pright { align-items: flex-start; width: 100%; }
+}
+
+@media (max-width: 760px) {
+  .top-in { gap: 8px; }
+  .brandpill { white-space: nowrap; padding: 7px 11px; font-size: 13px; gap: 6px; }
+  .topnav { margin-left: 0; gap: 2px; }
+  .topnav a[data-nav=home] { display: none; }
+  .top-right { gap: 8px; }
+  .theme button { width: 28px; }
+  details.usermenu .chev { display: none; }
+  .menu-pop { right: -4px; }
 }

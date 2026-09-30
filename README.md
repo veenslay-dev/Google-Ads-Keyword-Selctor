@@ -31,15 +31,41 @@ Environment variables:
 - `COOKIE_SECURE=1` marks the session cookie Secure. Set it whenever the app is served over HTTPS.
 - `ALLOW_PRIVATE_HOSTS=1` lets the crawler fetch localhost and private addresses. Leave it off unless you are testing.
 
+## Pages and addresses
+
+| Address | What it shows |
+| --- | --- |
+| `/` | The home page. People with no project see "Create your first project", everyone else sees "Create new project" and a "View projects" button |
+| `/projects` | The list of your projects |
+| `/projects/new` | The form for a new project |
+| `/projects/<slug>` | One project, on its **All keywords** page. The slug comes from the project name, for example `/projects/dinesh-aarjav` |
+| `/projects/<slug>/campaigns/<campaign>` | One campaign: its landing page, uploads and results |
+| `/projects/<slug>/business`, `/competitors`, `/team` | The other project pages |
+
+Every address works as a bookmark, a reload, and a link you can send to a teammate who has access. Back and forward behave as expected. A link opened while signed out is kept, and you land on it after signing in. Slugs are made when a project is created, stay the same if the project is renamed, and get `-2`, `-3` if you own two projects with the same name. The name "new" is reserved, so a project called New gets `new-project`. All of this works under `BASE_PATH`, for example `/keyword-selector/projects/dinesh-aarjav`.
+
+A project page has a **sidebar** with everything for that project: All keywords, your campaigns (with a + to add one), Business, Competitors, and Team and sharing.
+
+## Campaigns
+
+A campaign holds the keyword uploads for one Google Ads campaign. Open a campaign and add keywords as often as you like. Each add is its own upload with its own counts, status and downloads.
+
+- A campaign has a **name** and an optional **landing page**. An upload without a page of its own is judged against its campaign's page. Change the campaign page and its uploads show as "Out of date" until you analyse them again.
+- The **Google Ads Editor files use the campaign name** in the Campaign column, so you no longer type it in. Downloads can be taken for one upload, one campaign, or the whole project.
+- Uploads can be **moved** to another campaign, and a campaign can be renamed (its address stays the same) or deleted (with its uploads and keywords, after a confirmation).
+- With no campaign yet, the first upload creates one called "General". Projects saved before campaigns existed get a "General" campaign holding all their uploads.
+- The **All keywords** page shows every campaign together, read only apart from changing a keyword's category. Keywords are added inside campaigns.
+
 ## Look and feel
 
-Crimson theme with light and dark modes. The sun and moon switch in the top bar changes it, and the choice is remembered in the browser. The app opens on a Projects page, each project has a "Back to Projects" link, and a reload returns you to the project you were in. Icons are drawn inline, so there are no icon libraries to load. The only outside resource is the Inter font from Google Fonts, and the page falls back to the system font without it.
+Crimson theme with light and dark modes. The sun and moon switch in the top bar changes it, and the choice is remembered in the browser. Icons are drawn inline, so there are no icon libraries to load. The only outside resource is the Inter font from Google Fonts, and the page falls back to the system font without it. On a phone the sidebar sits above the page as a row of buttons.
 
 ## Daily workflow
 
-1. **Business tab, once.** Website, what you sell, where you work, the keywords you already want, and anything to never show for. Save, and the website is read in the background (up to 50 pages, with a progress bar). When it finishes you land on the Keywords tab.
-2. **Keywords tab, every day.** Press **New upload**. Give it a name, optionally the landing page the keywords are for, then upload files or paste a list. Keyword Planner exports, Google Ads search terms reports, Semrush, Ahrefs and plain lists all work. **Every upload is kept on its own**, with its own counts, its own status and its own downloads. Add new keywords tomorrow and they arrive as a new upload without touching yesterday's. Choosing several files at once makes one upload per file, each named after its file.
-3. **Pick an upload or "All uploads together"** to see its results. Change any category with the dropdown. The Download button and each upload's menu give Google Ads Editor files (keywords to target, negative keywords) and plain spreadsheets, limited to what you are looking at. Each upload's menu also lets you rename it, change its landing page, analyse it again, or delete it.
+1. **Business page, once.** Website, what you sell, where you work, the keywords you already want, and anything to never show for. Save, and the website is read in the background (up to 50 pages, with a progress bar). When it finishes you land on All keywords.
+2. **Create a campaign** from the sidebar, for example one per Google Ads campaign.
+3. **Open the campaign, every day.** Press **New upload**. Give it a name, optionally the landing page the keywords are for, then upload files or paste a list. Keyword Planner exports, Google Ads search terms reports, Semrush, Ahrefs and plain lists all work. **Every upload is kept on its own**, so tomorrow's keywords arrive as a new upload without touching yesterday's. Choosing several files at once makes one upload per file, each named after its file.
+4. **Pick an upload or "Whole campaign"** to see its results. Change any category with the dropdown. The Download button and each upload's menu give Google Ads Editor files (keywords to target, negative keywords) and plain spreadsheets, limited to what you are looking at. Each upload's menu also lets you rename it, change its landing page, move it, analyse it again, or delete it.
 
 A keyword already in the project is not added again. If a later file carries clicks, cost or conversions for a keyword you already hold, the results are added to it. Each upload holds up to 1000 keywords. Larger files are cut at 1000, and the message says how many were left out so you can upload the rest as another file.
 

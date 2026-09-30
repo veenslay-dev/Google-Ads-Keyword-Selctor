@@ -9,6 +9,7 @@ const openai = require('./lib/openai');
 const pipeline = require('./lib/pipeline');
 const { matchFor, hasPerf } = require('./lib/performance');
 const { splitList } = require('./lib/profile');
+const { slugify, uniqueSlug } = require('./lib/slug');
 const { suggestNegativeWords, suggestAdGroups } = require('./lib/classifier');
 const { crawlCompetitor, findGaps, MAX_COMPETITORS } = require('./lib/competitors');
 const { MAX_PAGES: MAX_SITE_PAGES } = require('./lib/crawler');
@@ -70,7 +71,6 @@ function applyFields(p, b) {
   if (b.exclude !== undefined) p.exclude = splitList(b.exclude).slice(0, 100);
   if (b.strictness !== undefined) p.strictness = b.strictness === 'strict' ? 'strict' : 'balanced';
   if (b.blockCompetitors !== undefined) p.blockCompetitors = Boolean(b.blockCompetitors);
-  if (b.campaign !== undefined) p.campaign = String(b.campaign).slice(0, 100);
 }
 
 const countsOf = rows => {
@@ -79,16 +79,44 @@ const countsOf = rows => {
   return c;
 };
 
-function summary(p, role, ownerName, memberCount) {
+// Project addresses: /projects/<slug>. Stable once made, unique among the projects one person owns.
+const PROJECT_SLUG = { reserved: { new: 'new-project' }, fallback: 'project' };
+
+function ensureSlug(p) {
+  if (p.slug) return false;
+  const owner = store.ownerOf(p.id);
+  const taken = new Set(owner ? store.listFor(owner).filter(r => r.role === 'owner' && r.project.id !== p.id).map(r => r.project.slug).filter(Boolean) : []);
+  p.slug = uniqueSlug(p.name, taken, PROJECT_SLUG);
+  return true;
+}
+
+// What one person sees: if two projects shared with them collide, the newer one gets a short suffix.
+function slugsFor(rows) {
+  const out = new Map();
+  const seen = new Set();
+  for (const r of [...rows].sort((a, b) => String(a.project.createdAt).localeCompare(String(b.project.createdAt)))) {
+    let s = r.project.slug || slugify(r.project.name) || 'project';
+    if (seen.has(s)) s = `${s}-${r.project.id.slice(0, 4)}`;
+    seen.add(s);
+    out.set(r.project.id, s);
+  }
+  return out;
+}
+
+function summary(p, role, ownerName, memberCount, slug) {
   const c = countsOf(p.keywords);
-  return { id: p.id, name: p.name, url: p.url, updatedAt: p.updatedAt, analyzed: Boolean(p.profile), total: c.total, counts: c, uploads: (p.batches || []).length, role, ownerName, shared: memberCount > 1 };
+  return { id: p.id, slug: slug || p.slug, name: p.name, url: p.url, updatedAt: p.updatedAt, analyzed: Boolean(p.profile), total: c.total, counts: c, uploads: (p.batches || []).length, campaigns: (p.campaigns || []).length, role, ownerName, shared: memberCount > 1 };
 }
 
 // The full profile weight tables are large and only useful server side.
 function publicProject(p, role) {
   const { profile, competitors = [], knowledge, ...rest } = p;
   const view = { ...rest, role, counts: countsOf(p.keywords), perfSummary: p.perfSummary || null };
-  view.batches = p.batches.map(b => ({ ...b, page: b.page ? { url: b.page.url, status: b.page.status, title: b.page.title, error: b.page.error } : undefined, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)), stale: Boolean(profile && b.ai && b.ai.status === 'done' && b.ai.profileAt !== profile.builtAt) }));
+  view.campaigns = (p.campaigns || []).map(c => {
+    const bs = p.batches.filter(b => b.campaignId === c.id);
+    return { ...c, uploads: bs.length, counts: countsOf(p.keywords.filter(k => bs.some(b => b.id === k.batchId))) };
+  });
+  view.batches = p.batches.map(b => ({ ...b, pageUrl: b.pageUrl, inheritedPageUrl: b.pageUrl ? undefined : pipeline.pageUrlFor(p, b) || undefined, page: b.page ? { url: b.page.url, status: b.page.status, title: b.page.title, error: b.page.error } : undefined, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)), stale: Boolean(b.ai && b.ai.status === 'done' && (b.pageChanged || (profile && b.ai.profileAt !== profile.builtAt))) }));
   view.competitors = competitors.map(c => ({ id: c.id, url: c.url, name: c.name, host: c.host, pages: c.pages, errors: c.errors, crawledAt: c.crawledAt }));
   view.brands = p.competitorBrands || [];
   view.blockCompetitors = p.blockCompetitors !== false;
@@ -109,7 +137,9 @@ function publicProject(p, role) {
 // so the ids the page holds stay valid.
 function load(pid) {
   const p = store.get(pid);
-  if (p && pipeline.upgrade(p)) { pipeline.rescore(p); store.put(p); }
+  if (!p) return p;
+  const changed = [pipeline.upgrade(p), ensureSlug(p)].some(Boolean);
+  if (changed) { pipeline.rescore(p); store.put(p); }
   return p;
 }
 
@@ -124,22 +154,24 @@ function rebuildBrands(p) {
   p.competitorBrands = [...out.values()];
 }
 
-function csvFor(p, type, campaign, batchId) {
-  const rows = batchId ? p.keywords.filter(k => k.batchId === batchId) : p.keywords;
+// scope: { batchId } or { campaignId } or neither (the whole project). Each row carries its own campaign's name.
+function csvFor(p, type, scope = {}) {
+  const campaignOf = new Map(p.batches.map(b => [b.id, (p.campaigns || []).find(c => c.id === b.campaignId)]));
+  const rows = p.keywords.filter(k => (!scope.batchId || k.batchId === scope.batchId) && (!scope.campaignId || (campaignOf.get(k.batchId) || {}).id === scope.campaignId));
   const groups = p.profile ? suggestAdGroups(rows, p.profile) : [];
   const groupOf = new Map();
   groups.forEach(g => g.ids.forEach(i => groupOf.set(i, g.name)));
   const batchName = new Map(p.batches.map(b => [b.id, b.name]));
-  const batchPage = new Map(p.batches.map(b => [b.id, b.pageUrl || '']));
+  const batchPage = new Map(p.batches.map(b => [b.id, pipeline.pageUrlFor(p, b)]));
+  const campName = k => (campaignOf.get(k.batchId) || {}).name || p.name;
   const by = c => rows.filter(k => k.category === c);
   const withPerf = rows.some(hasPerf);
   const withVol = rows.some(k => k.volume != null);
   const detail = ks => toCsv(
-    ['Keyword', 'Category', 'Confidence', 'Intent', 'Matched service', 'Suggested match type', 'Suggested ad group', 'Reason', 'File', 'Landing page', ...(withVol ? ['Avg monthly searches'] : []), ...(withPerf ? ['Impressions', 'Clicks', 'Cost', 'Conversions'] : [])],
-    ks.map(k => [k.keyword, k.category || '', k.confidence != null ? k.confidence + '%' : '', k.intent || '', k.service || '', k.matchType || '', groupOf.get(k.id) || '', [k.reason, k.note].filter(Boolean).join('. '), batchName.get(k.batchId) || '', batchPage.get(k.batchId) || '',
+    ['Keyword', 'Category', 'Confidence', 'Intent', 'Matched service', 'Suggested match type', 'Suggested ad group', 'Reason', 'Campaign', 'Upload', 'Landing page', ...(withVol ? ['Avg monthly searches'] : []), ...(withPerf ? ['Impressions', 'Clicks', 'Cost', 'Conversions'] : [])],
+    ks.map(k => [k.keyword, k.category || '', k.confidence != null ? k.confidence + '%' : '', k.intent || '', k.service || '', k.matchType || '', groupOf.get(k.id) || '', [k.reason, k.note].filter(Boolean).join('. '), campName(k), batchName.get(k.batchId) || '', batchPage.get(k.batchId) || '',
       ...(withVol ? [k.volume ?? ''] : []), ...(withPerf ? [k.impressions ?? '', k.clicks ?? '', k.cost ?? '', k.conversions ?? ''] : [])])
   );
-  const camp = campaign || p.campaign || p.name;
   switch (type) {
     case 'all': return detail(rows);
     case 'priority': return detail(by('priority'));
@@ -148,11 +180,13 @@ function csvFor(p, type, campaign, batchId) {
     case 'negative': return detail(by('negative'));
     case 'ads-targeting':
       return toCsv(['Campaign', 'Ad Group', 'Keyword', 'Criterion Type', 'Status'],
-        [...by('priority'), ...by('relevant')].map(k => [camp, groupOf.get(k.id) || 'Other', k.keyword, k.matchType || 'Phrase', k.category === 'priority' ? 'Enabled' : 'Paused']));
+        [...by('priority'), ...by('relevant')].map(k => [campName(k), groupOf.get(k.id) || 'Other', k.keyword, k.matchType || 'Phrase', k.category === 'priority' ? 'Enabled' : 'Paused']));
     case 'ads-negatives':
-      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], by('negative').map(k => [camp, k.keyword, k.matchType || 'Negative Phrase']));
-    case 'negative-words':
-      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], suggestNegativeWords(rows, p.profile || { uni: {} }).map(w => [camp, w.word, 'Negative Broad']));
+      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], by('negative').map(k => [campName(k), k.keyword, k.matchType || 'Negative Phrase']));
+    case 'negative-words': {
+      const one = scope.campaignId ? (p.campaigns || []).find(c => c.id === scope.campaignId) : null;
+      return toCsv(['Campaign', 'Keyword', 'Criterion Type'], suggestNegativeWords(rows, p.profile || { uni: {} }).map(w => [one ? one.name : p.name, w.word, 'Negative Broad']));
+    }
     default: throw new HttpError(400, 'Unknown export type.');
   }
 }
@@ -202,16 +236,23 @@ async function api(req, res, url) {
   if (parts[0] !== 'projects') throw new HttpError(404, 'Not found');
 
   if (parts.length === 1) {
-    if (method === 'GET') return json(store.listFor(user.id).map(r => summary(r.project, r.role, r.ownerName, r.memberCount)));
+    if (method === 'GET') {
+      const rows = store.listFor(user.id);
+      for (const r of rows) if (!r.project.slug && r.role === 'owner' && ensureSlug(r.project)) store.put(r.project);
+      const slugs = slugsFor(rows);
+      return json(rows.map(r => summary(r.project, r.role, r.ownerName, r.memberCount, slugs.get(r.project.id))));
+    }
     if (method === 'POST') {
       const b = await readBody(req);
       if (!String(b.name || '').trim()) throw new HttpError(400, 'Give the project a name.');
       const p = {
-        id: store.id(), name: '', url: '', description: '', offerings: '', serviceArea: '', seeds: [], exclude: [], strictness: 'balanced', campaign: '',
-        blockCompetitors: true, competitors: [], competitorBrands: [], batches: [],
+        id: store.id(), name: '', url: '', description: '', offerings: '', serviceArea: '', seeds: [], exclude: [], strictness: 'balanced',
+        blockCompetitors: true, competitors: [], competitorBrands: [], batches: [], campaigns: [],
         createdAt: new Date().toISOString(), profile: null, keywords: [],
       };
       applyFields(p, b);
+      const mine = store.listFor(user.id).filter(r => r.role === 'owner').map(r => r.project.slug).filter(Boolean);
+      p.slug = uniqueSlug(p.name, new Set(mine), PROJECT_SLUG);
       store.create(p, user.id);
       return json(publicProject(p, 'owner'), 201);
     }
@@ -296,11 +337,20 @@ async function api(req, res, url) {
       if (!fresh.length && !updated) throw new HttpError(409, `Nothing new here. All ${dupes} keywords are already in this project.`);
       let batch = null;
       if (fresh.length) {
+        // Every upload belongs to a campaign. With exactly one campaign, or none yet, the choice makes itself.
+        let camp = b.campaignId ? p.campaigns.find(c => c.id === b.campaignId) : null;
+        if (b.campaignId && !camp) throw new HttpError(404, 'Campaign not found');
+        if (!camp) {
+          if (p.campaigns.length === 1) camp = p.campaigns[0];
+          else if (!p.campaigns.length) camp = pipeline.newCampaign(p, 'General');
+          else throw new HttpError(400, 'Choose which campaign these keywords belong to.');
+        }
         const perf = fresh.some(hasPerf);
         const kind = perf ? 'Search terms report' : fresh.some(r => r.volume != null || r.bid != null || r.competition != null) ? 'Keyword tool export' : 'Keyword list';
         const stamp = new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC';
         const name = String(b.name || '').trim() || String(b.filename || '').replace(/\.[a-z0-9]+$/i, '').trim() || `${kind} ${stamp}`;
         batch = pipeline.newBatch({ name: name.slice(0, 80), filename: String(b.filename || '').slice(0, 120), kind });
+        batch.campaignId = camp.id;
         if (pageUrl) batch.pageUrl = pageUrl;
         p.batches.push(batch);
         for (const r of fresh) p.keywords.push({ id: store.id(), batchId: batch.id, ...r });
@@ -320,6 +370,12 @@ async function api(req, res, url) {
         const name = String(b.name || '').trim().slice(0, 80);
         if (!name) throw new HttpError(400, 'Give the upload a name.');
         batch.name = name;
+      }
+      if (b.campaignId !== undefined && b.campaignId !== batch.campaignId) {
+        const to = p.campaigns.find(c => c.id === b.campaignId);
+        if (!to) throw new HttpError(404, 'Campaign not found');
+        batch.campaignId = to.id;
+        if (!batch.pageUrl) batch.pageChanged = true; // it would now be judged against another campaign's page
       }
       let restart = false;
       if (b.pageUrl !== undefined) {
@@ -350,6 +406,62 @@ async function api(req, res, url) {
       if (pipeline.isRunning(pid, bid)) throw new HttpError(409, 'That upload is already being analysed.');
       pipeline.startAI(pid, bid);
       return json(publicProject(store.get(pid), role));
+    }
+  }
+
+  /* ----- campaigns ----- */
+  if (sub === 'campaigns') {
+    const cid = parts[3];
+    if (method === 'POST' && !cid) {
+      need('editor');
+      const b = await readBody(req);
+      const name = String(b.name || '').trim();
+      if (!name) throw new HttpError(400, 'Give the campaign a name.');
+      const pageUrl = String(b.pageUrl || '').trim() ? normalizeUrl(b.pageUrl) : '';
+      const p = load(pid);
+      if (p.campaigns.some(c => c.name.toLowerCase() === name.toLowerCase())) throw new HttpError(409, 'A campaign with that name already exists.');
+      const c = pipeline.newCampaign(p, name, pageUrl);
+      store.put(p);
+      return send(load(pid), { campaignId: c.id }, 201);
+    }
+    if (cid) {
+      need('editor');
+      const p = load(pid);
+      const c = p.campaigns.find(x => x.id === cid);
+      if (!c) throw new HttpError(404, 'Campaign not found');
+      if (method === 'PATCH') {
+        const b = await readBody(req);
+        if (b.name !== undefined) {
+          const name = String(b.name || '').trim().slice(0, 80);
+          if (!name) throw new HttpError(400, 'Give the campaign a name.');
+          if (p.campaigns.some(x => x.id !== cid && x.name.toLowerCase() === name.toLowerCase())) throw new HttpError(409, 'A campaign with that name already exists.');
+          c.name = name; // the address keeps its slug so bookmarks keep working
+        }
+        if (b.pageUrl !== undefined) {
+          const url = String(b.pageUrl || '').trim() ? normalizeUrl(b.pageUrl) : '';
+          if ((c.pageUrl || '') !== url) {
+            c.pageUrl = url || undefined;
+            for (const bt of p.batches) if (bt.campaignId === cid && !bt.pageUrl) bt.pageChanged = true;
+          }
+        }
+        store.put(p);
+        return json(publicProject(p, role));
+      }
+      if (method === 'DELETE') {
+        const gone = new Set(p.batches.filter(x => x.campaignId === cid).map(x => x.id));
+        p.batches = p.batches.filter(x => !gone.has(x.id));
+        p.keywords = p.keywords.filter(k => !gone.has(k.batchId));
+        p.campaigns = p.campaigns.filter(x => x.id !== cid);
+        pipeline.rescore(p);
+        store.put(p);
+        return json(publicProject(p, role));
+      }
+      if (method === 'POST' && parts[4] === 'recheck') {
+        if (!openai.enabled()) throw new HttpError(409, 'Smart analysis is not switched on for this server. Add OPENAI_API_KEY and restart.');
+        if (!p.profile) throw new HttpError(409, 'Read the business website first so the analysis knows what you sell.');
+        for (const bt of p.batches) if (bt.campaignId === cid && !pipeline.isRunning(pid, bt.id)) pipeline.startAI(pid, bt.id);
+        return json(publicProject(store.get(pid), role));
+      }
     }
   }
 
@@ -463,10 +575,13 @@ async function api(req, res, url) {
     const p = load(pid);
     const type = url.searchParams.get('type') || 'all';
     const bid = url.searchParams.get('batch') || '';
+    const cid = url.searchParams.get('campaignId') || '';
     const batch = bid ? p.batches.find(b => b.id === bid) : null;
+    const camp = cid ? p.campaigns.find(c => c.id === cid) : null;
     if (bid && !batch) throw new HttpError(404, 'Upload not found');
-    const csv = csvFor(p, type, url.searchParams.get('campaign'), bid);
-    const slug = (batch ? batch.name : p.name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'project';
+    if (cid && !camp) throw new HttpError(404, 'Campaign not found');
+    const csv = csvFor(p, type, { batchId: bid, campaignId: cid });
+    const slug = slugify((batch || camp || p).name) || 'project';
     res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${slug}-${type}.csv"`, 'cache-control': 'no-store' });
     return res.end(csv);
   }
@@ -474,19 +589,25 @@ async function api(req, res, url) {
   throw new HttpError(404, 'Not found');
 }
 
+// The app draws its own pages (/projects, /projects/<slug>/...). Any address without a file extension that is not
+// a real file gets the app shell, so a bookmark or a reload lands in the right place.
+function serveIndex(res) {
+  res.writeHead(200, { 'content-type': TYPES['.html'], 'cache-control': 'no-cache' });
+  res.end(fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replaceAll('%BASE%', BASE));
+}
+
 function serveStatic(req, res, url) {
   let rel;
   try { rel = decodeURIComponent(url.pathname); } catch { rel = '/'; }
-  if (rel === '/') rel = '/index.html';
+  if (rel === '/') return serveIndex(res);
   const file = path.normalize(path.join(PUBLIC, rel));
-  if (!file.startsWith(PUBLIC + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+  const isFile = file.startsWith(PUBLIC + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile();
+  if (!isFile) {
+    if (req.method === 'GET' && !path.extname(rel)) return serveIndex(res);
     res.writeHead(404, { 'content-type': 'text/plain' });
     return res.end('Not found');
   }
-  if (file.endsWith('index.html')) {
-    res.writeHead(200, { 'content-type': TYPES['.html'] });
-    return res.end(fs.readFileSync(file, 'utf8').replaceAll('%BASE%', BASE));
-  }
+  if (file === path.join(PUBLIC, 'index.html')) return serveIndex(res);
   res.writeHead(200, { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
 }
