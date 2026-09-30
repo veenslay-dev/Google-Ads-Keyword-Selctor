@@ -8,10 +8,10 @@ const auth = require('./lib/auth');
 const openai = require('./lib/openai');
 const pipeline = require('./lib/pipeline');
 const { matchFor, hasPerf } = require('./lib/performance');
-const { crawlSite } = require('./lib/crawler');
-const { buildProfile, splitList } = require('./lib/profile');
+const { splitList } = require('./lib/profile');
 const { suggestNegativeWords, suggestAdGroups } = require('./lib/classifier');
 const { crawlCompetitor, findGaps, MAX_COMPETITORS } = require('./lib/competitors');
+const { MAX_PAGES: MAX_SITE_PAGES } = require('./lib/crawler');
 const { extractKeywords, MAX_KEYWORDS } = require('./lib/sheet');
 const { toCsv } = require('./lib/csv');
 
@@ -86,9 +86,9 @@ function summary(p, role, ownerName, memberCount) {
 
 // The full profile weight tables are large and only useful server side.
 function publicProject(p, role) {
-  const { profile, competitors = [], ...rest } = p;
+  const { profile, competitors = [], knowledge, ...rest } = p;
   const view = { ...rest, role, counts: countsOf(p.keywords), perfSummary: p.perfSummary || null };
-  view.batches = p.batches.map(b => ({ ...b, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)), stale: Boolean(profile && b.ai && b.ai.status === 'done' && b.ai.profileAt !== profile.builtAt) }));
+  view.batches = p.batches.map(b => ({ ...b, page: b.page ? { url: b.page.url, status: b.page.status, title: b.page.title, error: b.page.error } : undefined, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)), stale: Boolean(profile && b.ai && b.ai.status === 'done' && b.ai.profileAt !== profile.builtAt) }));
   view.competitors = competitors.map(c => ({ id: c.id, url: c.url, name: c.name, host: c.host, pages: c.pages, errors: c.errors, crawledAt: c.crawledAt }));
   view.brands = p.competitorBrands || [];
   view.blockCompetitors = p.blockCompetitors !== false;
@@ -96,6 +96,7 @@ function publicProject(p, role) {
     view.profile = {
       builtAt: profile.builtAt, summary: profile.summary || '', topTerms: profile.topTerms, topPhrases: profile.topPhrases,
       aiOfferings: profile.aiOfferings || [], notOffered: profile.notOffered || [], areasServed: profile.areasServed || [], pages: profile.pages || [], errors: profile.errors || [], aiNote: profile.aiNote || '',
+      services: (p.knowledge && p.knowledge.catalogue ? p.knowledge.catalogue.services : []),
     };
     view.negativeWords = suggestNegativeWords(p.keywords, profile);
     view.adGroups = suggestAdGroups(p.keywords, profile);
@@ -129,12 +130,13 @@ function csvFor(p, type, campaign, batchId) {
   const groupOf = new Map();
   groups.forEach(g => g.ids.forEach(i => groupOf.set(i, g.name)));
   const batchName = new Map(p.batches.map(b => [b.id, b.name]));
+  const batchPage = new Map(p.batches.map(b => [b.id, b.pageUrl || '']));
   const by = c => rows.filter(k => k.category === c);
   const withPerf = rows.some(hasPerf);
   const withVol = rows.some(k => k.volume != null);
   const detail = ks => toCsv(
-    ['Keyword', 'Category', 'Confidence', 'Intent', 'Suggested match type', 'Suggested ad group', 'Reason', 'File', ...(withVol ? ['Avg monthly searches'] : []), ...(withPerf ? ['Impressions', 'Clicks', 'Cost', 'Conversions'] : [])],
-    ks.map(k => [k.keyword, k.category || '', k.confidence != null ? k.confidence + '%' : '', k.intent || '', k.matchType || '', groupOf.get(k.id) || '', [k.reason, k.note].filter(Boolean).join('. '), batchName.get(k.batchId) || '',
+    ['Keyword', 'Category', 'Confidence', 'Intent', 'Matched service', 'Suggested match type', 'Suggested ad group', 'Reason', 'File', 'Landing page', ...(withVol ? ['Avg monthly searches'] : []), ...(withPerf ? ['Impressions', 'Clicks', 'Cost', 'Conversions'] : [])],
+    ks.map(k => [k.keyword, k.category || '', k.confidence != null ? k.confidence + '%' : '', k.intent || '', k.service || '', k.matchType || '', groupOf.get(k.id) || '', [k.reason, k.note].filter(Boolean).join('. '), batchName.get(k.batchId) || '', batchPage.get(k.batchId) || '',
       ...(withVol ? [k.volume ?? ''] : []), ...(withPerf ? [k.impressions ?? '', k.clicks ?? '', k.cost ?? '', k.conversions ?? ''] : [])])
   );
   const camp = campaign || p.campaign || p.name;
@@ -191,7 +193,7 @@ async function api(req, res, url) {
   if (method !== 'GET' && method !== 'HEAD' && req.headers['x-csrf'] !== '1') throw new HttpError(403, 'Missing request header. Reload the page and try again.');
 
   if (parts[0] === 'config') {
-    return json({ aiEnabled: openai.enabled(), aiModel: openai.enabled() ? openai.model() : '', maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
+    return json({ aiEnabled: openai.enabled(), maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, maxPages: MAX_SITE_PAGES, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
   }
   if (parts[0] === 'auth') return authRoutes(req, res, parts, json);
 
@@ -242,44 +244,24 @@ async function api(req, res, url) {
   // Cheap enough to poll every couple of seconds while AI is working.
   if (sub === 'status' && method === 'GET') {
     const p = load(pid);
-    return json({ batches: p.batches.map(b => ({ id: b.id, ai: b.ai, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)) })), busy: p.batches.some(b => b.ai && b.ai.status === 'running') });
+    const busyAI = b => b.ai && (b.ai.status === 'running' || b.ai.status === 'queued');
+    return json({
+      analysis: p.analysis || null,
+      batches: p.batches.map(b => ({ id: b.id, ai: b.ai, page: b.page ? { url: b.page.url, status: b.page.status, title: b.page.title, error: b.page.error } : undefined, counts: countsOf(p.keywords.filter(k => k.batchId === b.id)) })),
+      busy: p.batches.some(busyAI) || Boolean(p.analysis && p.analysis.status === 'running'),
+    });
   }
 
+  // Reading the website takes a while (up to 50 pages), so it runs in the background and the page polls the status.
   if (sub === 'analyze' && method === 'POST') {
     need('editor');
     const b = await readBody(req);
-    const p0 = load(pid);
-    applyFields(p0, b);
-    store.put(p0); // keep what was typed even if the crawl fails
-    if (!p0.url && !p0.description && !p0.offerings && !p0.seeds.length) throw new HttpError(400, 'Add a website address or describe what you sell first.');
-    let pages = [], errors = [];
-    if (p0.url) {
-      try { ({ pages, errors } = await crawlSite(p0.url)); }
-      catch (e) {
-        if (!p0.description && !p0.offerings && !p0.seeds.length) throw new HttpError(422, 'Could not read the website (' + e.message + '). Describe the business below and try again.');
-        errors = [{ url: p0.url, error: e.message }];
-      }
-    }
-    let extraTerms = [], info = {}, aiNote = '';
-    if (openai.enabled() && (pages.length || p0.description)) {
-      try { info = await openai.describeBusiness(p0, pages); extraTerms = info.offerings; }
-      catch (e) { aiNote = 'AI summary skipped: ' + e.message; }
-    }
-    const p = load(pid); // reload: teammates may have edited while the crawl ran
-    const profile = buildProfile({ project: p, pages, extraTerms });
-    profile.summary = info.summary || '';
-    profile.aiOfferings = info.offerings || [];
-    profile.notOffered = info.notOffered || [];
-    profile.areasServed = info.areasServed || [];
-    profile.aiNote = aiNote;
-    profile.pages = pages.map(pg => ({ url: pg.url, title: pg.title, words: pg.text.split(' ').length }));
-    profile.errors = errors;
-    if (!profile.topTerms.length) throw new HttpError(422, 'Not enough readable text to build a profile. Add a description or a few seed keywords.');
-    p.profile = profile;
-    pipeline.rescore(p);
-    store.put(p);
-    // Uploads that were waiting for a business profile can be checked now.
-    for (const bt of p.batches) if (bt.ai && bt.ai.status === 'waiting') pipeline.startAI(pid, bt.id);
+    const p = load(pid);
+    if (pipeline.isAnalyzing(pid)) throw new HttpError(409, 'The website is already being read. Wait for it to finish.');
+    applyFields(p, b);
+    if (!p.url && !p.description && !p.offerings && !p.seeds.length) throw new HttpError(400, 'Add a website address or describe what you sell first.');
+    store.put(p); // keep what was typed even if reading the site fails
+    pipeline.startAnalysis(pid);
     return json(publicProject(store.get(pid), role));
   }
 
@@ -295,6 +277,7 @@ async function api(req, res, url) {
       }
       const { rows, note } = parsed;
       if (!rows.length) throw new HttpError(400, 'No keywords found in that file.');
+      const pageUrl = String(b.pageUrl || '').trim() ? normalizeUrl(b.pageUrl) : '';
       const p = load(pid);
       const byKw = new Map(p.keywords.map(k => [k.keyword.toLowerCase(), k]));
       const fresh = [];
@@ -318,6 +301,7 @@ async function api(req, res, url) {
         const stamp = new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }) + ' UTC';
         const name = String(b.name || '').trim() || String(b.filename || '').replace(/\.[a-z0-9]+$/i, '').trim() || `${kind} ${stamp}`;
         batch = pipeline.newBatch({ name: name.slice(0, 80), filename: String(b.filename || '').slice(0, 120), kind });
+        if (pageUrl) batch.pageUrl = pageUrl;
         p.batches.push(batch);
         for (const r of fresh) p.keywords.push({ id: store.id(), batchId: batch.id, ...r });
       }
@@ -332,11 +316,19 @@ async function api(req, res, url) {
       const p = load(pid);
       const batch = p.batches.find(x => x.id === bid);
       if (!batch) throw new HttpError(404, 'Upload not found');
-      const name = String(b.name || '').trim().slice(0, 80);
-      if (!name) throw new HttpError(400, 'Give the upload a name.');
-      batch.name = name;
+      if (b.name !== undefined) {
+        const name = String(b.name || '').trim().slice(0, 80);
+        if (!name) throw new HttpError(400, 'Give the upload a name.');
+        batch.name = name;
+      }
+      let restart = false;
+      if (b.pageUrl !== undefined) {
+        const url = String(b.pageUrl || '').trim() ? normalizeUrl(b.pageUrl) : '';
+        if ((batch.pageUrl || '') !== url) { batch.pageUrl = url || undefined; batch.page = undefined; restart = Boolean(openai.enabled() && p.profile); }
+      }
       store.put(p);
-      return json(publicProject(p, role));
+      if (restart) pipeline.startAI(pid, bid);
+      return json(publicProject(store.get(pid), role));
     }
     if (bid && method === 'DELETE') {
       need('editor');
@@ -353,9 +345,9 @@ async function api(req, res, url) {
       const p = load(pid);
       const batch = p.batches.find(x => x.id === bid);
       if (!batch) throw new HttpError(404, 'Upload not found');
-      if (!openai.enabled()) throw new HttpError(409, 'AI is not switched on for this server. Add OPENAI_API_KEY and restart.');
-      if (!p.profile) throw new HttpError(409, 'Analyze the business first so the AI knows what you sell.');
-      if (batch.ai && batch.ai.status === 'running' && pipeline.isRunning(pid, bid)) throw new HttpError(409, 'That upload is already being checked.');
+      if (!openai.enabled()) throw new HttpError(409, 'Smart analysis is not switched on for this server. Add OPENAI_API_KEY and restart.');
+      if (!p.profile) throw new HttpError(409, 'Read the business website first so the analysis knows what you sell.');
+      if (pipeline.isRunning(pid, bid)) throw new HttpError(409, 'That upload is already being analysed.');
       pipeline.startAI(pid, bid);
       return json(publicProject(store.get(pid), role));
     }

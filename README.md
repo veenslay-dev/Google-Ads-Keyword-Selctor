@@ -33,30 +33,38 @@ Environment variables:
 
 ## Daily workflow
 
-1. **Business tab, once.** Website, what you sell, where you work, the keywords you already want, and anything to never show for. The site is read and turned into a profile.
-2. **Keywords tab, every day.** Drop one or more files, or paste a list. Keyword Planner exports, Google Ads search terms reports, Semrush, Ahrefs and plain lists all work. **Each file or paste becomes its own upload**, with its own counts, its own AI status and its own downloads. Add new keywords tomorrow and they arrive as a new upload, without touching yesterday's.
-3. **Pick an upload or "All uploads together"** to see its results. Change any category with the dropdown. The Download button and each upload's menu give Google Ads Editor files (keywords to target, negative keywords) and plain spreadsheets, limited to what you are looking at.
+1. **Business tab, once.** Website, what you sell, where you work, the keywords you already want, and anything to never show for. Save, and the website is read in the background (up to 50 pages, with a progress bar). When it finishes you land on the Keywords tab.
+2. **Keywords tab, every day.** Press **New upload**. Give it a name, optionally the landing page the keywords are for, then upload files or paste a list. Keyword Planner exports, Google Ads search terms reports, Semrush, Ahrefs and plain lists all work. **Every upload is kept on its own**, with its own counts, its own status and its own downloads. Add new keywords tomorrow and they arrive as a new upload without touching yesterday's. Choosing several files at once makes one upload per file, each named after its file.
+3. **Pick an upload or "All uploads together"** to see its results. Change any category with the dropdown. The Download button and each upload's menu give Google Ads Editor files (keywords to target, negative keywords) and plain spreadsheets, limited to what you are looking at. Each upload's menu also lets you rename it, change its landing page, analyse it again, or delete it.
 
 A keyword already in the project is not added again. If a later file carries clicks, cost or conversions for a keyword you already hold, the results are added to it. Each upload holds up to 1000 keywords. Larger files are cut at 1000, and the message says how many were left out so you can upload the rest as another file.
 
 Search terms reports are not a separate feature. Upload them like anything else. Rows with clicks, cost or conversions are judged on those numbers first: converting keywords become Priority, keywords already excluded in your account become Negative, and keywords that spent money, never converted, and either do not fit or have had enough clicks become Negative. "Enough clicks" is about three times the clicks a conversion usually takes at your account's own rate (between 10 and 200). This is a rule of thumb, not a significance test.
 
-## The AI specialist
+## What the analysis knows
 
-With `OPENAI_API_KEY` set, every new upload is read by an AI keyword specialist after the rules have sorted it, so the list is usable straight away and improves as the checks finish (progress shows in the upload's row).
+Without `OPENAI_API_KEY` the tool sorts by built-in rules. With it, every upload is analysed automatically the moment it is added, after the rules have given a first sort, so the list is usable straight away and improves as the analysis finishes.
+
+**The crawler does the reading. The model is given what it found.** The model never browses anything.
+
+- The crawler reads up to 50 pages of the business website: breadth first, service-like pages first, from links and from the sitemap, five at a time, on the same host only, honouring `robots.txt`, and stopping early after 80 seconds.
+- The pages are condensed once into a **service catalogue** (what each service is, who it is for, which page describes it) and stored with the project, together with the text of every page (first 2,500 characters each).
+- Every analysis receives that catalogue, plus the few stored pages whose wording is closest to the keywords in that batch.
+- If an upload has a **landing page**, that page is fetched fresh when the upload is analysed and given in full. Keywords are then judged against that exact service: a keyword that fits the business but belongs to a different service is marked Relevant and the reason names the service it belongs to. If the page cannot be read, the upload is analysed without it and says so.
+- Each keyword gets a matched **service** from the catalogue, shown in the results and included in the downloads.
 
 How it is set up to be accurate:
 
-- **It knows the business.** The prompt carries the business summary, what you sell and do not sell, where you work, your starting keywords, your exclusions, competitor brands and the research-query setting.
-- **Every keyword is judged**, not just the borderline ones, in batches of 100. Each answer has a label, a confidence from 0 to 100, an intent and a short reason.
-- **Shaky answers get a second opinion.** Anything under 70 confidence, or where the AI and the rules disagree sharply, is sent back with both opinions for a final call. If it is still under 60 after that, it goes to Review with "Unsure" and the reason. The tool prefers showing you a doubt over hiding one.
-- **It learns from your corrections.** When you move a keyword, the last 40 corrections go into the next check as examples.
-- **Hard facts outrank opinions.** Your exclusions, competitor brands, and real campaign results are never overruled by the AI. Those keywords are not even sent.
-- **Unknown file layouts** are mapped by the AI, so exports without recognisable column titles still load.
+- **Every keyword is judged**, not just the borderline ones, in batches of 100, each with a label, a confidence from 0 to 100, an intent, a matched service and a short reason.
+- **Shaky answers get a second opinion.** Anything under 70 confidence, or where the analysis and the keyword rules disagree sharply, is sent back with both opinions for a final call. If it is still under 60, it goes to Review marked "Unsure" with the reason. The tool prefers showing you a doubt over hiding one.
+- **It learns from your corrections.** When you move a keyword, the last 40 corrections go into the next analysis as examples.
+- **Hard facts outrank opinions.** Your exclusions, competitor brands and real campaign results are never overruled. Those keywords are not even sent.
+- **Uploads are analysed one at a time**, in the order added, so a burst of files cannot run into rate limits.
+- **Unknown file layouts** are mapped by the model, so exports without recognisable column titles still load.
 
 What it cannot do: no method reaches 100% on this. Whether a keyword is worth buying depends on facts only you know, and the same words can be a buyer for one business and waste for another. The design aims to make errors rare, to make the uncertain ones visible, and to let your corrections stick. Skim the Negative and Review lists before uploading them to Google Ads.
 
-Cost: every keyword is sent to OpenAI, plus extra calls for the uncertain ones. Check OpenAI's current pricing for your model. The key stays on the server in the environment, is never sent to the browser, and is not stored in the database. Business text and keywords do go to OpenAI, so do not use this for material you cannot share with them. If a call fails, the rules result is kept and the upload shows "AI check failed" with the reason. "Re-check with AI" in the upload's menu runs it again. When you change the business details and read the website again, earlier checks are marked "out of date" until you re-check them.
+Cost and privacy: every keyword is sent to OpenAI, plus extra calls for the uncertain ones, plus one larger call per website read and a slice of the stored pages with each batch. Check OpenAI's current pricing for your model. The key stays on the server, is never sent to the browser and is not stored in the database. Business text, page text and keywords do go to OpenAI, so do not use this for material you cannot share with them. If a call fails, the basic sorting is kept and the upload shows "Analysis failed" with the reason. When you change the business details and read the website again, earlier analyses are marked "Out of date" until you analyse them again.
 
 ## Accounts and sharing
 
@@ -84,7 +92,7 @@ Enter up to three competitor sites. About five pages are read from each.
 ## How it works
 
 1. **Project brief.** Website address, description, products or services, starting keywords, and a "never show for" list (competitors, things you do not sell).
-2. **Crawl.** Up to 8 same-site pages are fetched (service, product and about pages first). Titles, meta text, headings, image alt text and body copy are read. The crawler refuses private network addresses.
+2. **Crawl.** Up to 50 same-site pages (see above). Titles, meta text, headings, image alt text and body copy are read. The crawler refuses private network addresses and honours `robots.txt`.
 3. **Profile.** Terms and two-word phrases are weighted by where they appear. Text you typed counts most, then titles and H1s, then subheadings, then body copy. Place names ("in Leeds") are detected so a location alone never makes a keyword relevant.
 4. **Keywords.** Paste them, or upload CSV, TSV, TXT or XLSX. The keyword column is found by its header, and volume, competition, bid, clicks and cost columns are kept when present. Google Keyword Planner exports (UTF-16, two title lines, ranges like `1K – 10K`) are handled. Duplicates and `[exact]`, `"phrase"` and `+broad` decoration are cleaned.
 5. **Scoring.** Each keyword gets relevance against the profile, an intent label (transactional, commercial, informational, unclear), a 0 to 100 score, a suggested match type and a plain-language reason. You can change any category by hand and it will stick when the list is re-scored.

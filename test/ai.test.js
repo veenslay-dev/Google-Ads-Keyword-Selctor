@@ -12,6 +12,7 @@ const http = require('node:http');
 
 const calls = [];
 let queriesSeen = [];
+const order = [];
 const mock = http.createServer((req, res) => {
   let body = '';
   req.on('data', c => (body += c));
@@ -27,12 +28,16 @@ const mock = http.createServer((req, res) => {
     if (/RE-CHECK/.test(sys)) {
       calls.push({ kind: 'verify', user, n: lines.length });
       return reply({ results: lines.map(l => /unsure/.test(l.kw)
-        ? { i: l.i, label: 'priority', confidence: 40, intent: 'commercial', reason: 'still unclear' }
-        : { i: l.i, label: 'relevant', confidence: 65, intent: 'commercial', reason: 'settled on second look' }) });
+        ? { i: l.i, label: 'priority', confidence: 40, intent: 'commercial', service: '', reason: 'still unclear' }
+        : { i: l.i, label: 'relevant', confidence: 65, intent: 'commercial', service: '', reason: 'settled on second look' }) });
     }
-    if (/study small business websites/.test(sys)) {
-      calls.push({ kind: 'business', user });
-      return reply({ summary: 'Test summary of the business.', offerings: ['nri tax filing'], not_offered: ['visa help'], areas_served: ['India'] });
+    if (/study a business website/.test(sys)) {
+      calls.push({ kind: 'catalogue', user });
+      return reply({
+        summary: 'Test summary of the business.',
+        services: [{ name: 'NRI tax filing', page_url: 'https://site.test/services/nri-filing', what: 'Files income tax returns for NRIs', for_whom: 'NRIs abroad' }, { name: 'Property sale tax', page_url: 'https://site.test/services/property-tax', what: 'Tax planning on property sales', for_whom: 'NRIs selling property' }],
+        not_offered: ['visa help'], areas_served: ['India'],
+      });
     }
     if (/first rows of an exported spreadsheet/.test(sys)) {
       calls.push({ kind: 'columns', user });
@@ -40,25 +45,41 @@ const mock = http.createServer((req, res) => {
     }
     calls.push({ kind: 'judge', user, n: lines.length });
     queriesSeen.push(...lines.map(l => l.kw));
-    reply({ results: lines.map(l => {
+    if (lines.some(l => /slowkw/.test(l.kw))) { order.push('slow-start'); return setTimeout(() => { order.push('slow-end'); answer(); }, 500); }
+    order.push('fast');
+    answer();
+    function answer() { reply({ results: lines.map(l => {
       const kw = l.kw;
-      if (/unsure/.test(kw)) return { i: l.i, label: 'relevant', confidence: 50, intent: 'commercial', reason: 'hard to say' };
-      if (/jobs|salary/.test(kw)) return { i: l.i, label: 'negative', confidence: 96, intent: 'informational', reason: 'job seeker' };
-      if (/tax|nri/.test(kw)) return { i: l.i, label: 'priority', confidence: 92, intent: 'commercial', reason: 'wants tax help' };
-      return { i: l.i, label: 'relevant', confidence: 80, intent: 'commercial', reason: 'related' };
-    }) });
+      const svc = /property/.test(kw) ? 'Property sale tax' : /tax|nri/.test(kw) ? 'NRI tax filing' : '';
+      if (/unsure/.test(kw)) return { i: l.i, label: 'relevant', confidence: 50, intent: 'commercial', service: '', reason: 'hard to say' };
+      if (/jobs|salary/.test(kw)) return { i: l.i, label: 'negative', confidence: 96, intent: 'informational', service: '', reason: 'job seeker' };
+      if (/tax|nri/.test(kw)) return { i: l.i, label: 'priority', confidence: 92, intent: 'commercial', service: svc, reason: 'wants tax help' };
+      return { i: l.i, label: 'relevant', confidence: 80, intent: 'commercial', service: '', reason: 'related' };
+    }) }); }
   });
 });
 
-let server, base, cookie = '', pid;
+const PAGE = (title, body, links = '') => `<html><head><title>${title}</title></head><body><h1>${title}</h1><h2>${body}</h2><p>${body} for non resident Indians.</p>${links}</body></html>`;
+const siteServer = http.createServer((req, res) => {
+  const out = html => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(html); };
+  if (req.url === '/') return out(PAGE('NRI Tax Experts', 'Tax help for NRIs', '<a href="/services/nri-filing">f</a><a href="/services/property-tax">p</a>'));
+  if (req.url === '/services/nri-filing') return out(PAGE('NRI tax filing service', 'We file income tax returns and claim refunds'));
+  if (req.url === '/services/property-tax') return out(PAGE('Property sale tax for NRIs', 'Capital gains planning when an NRI sells property in India'));
+  res.writeHead(404); res.end();
+});
+
+let server, base, cookie = '', pid, siteBase;
 test.before(async () => {
   await new Promise(r => mock.listen(0, r));
+  await new Promise(r => siteServer.listen(0, r));
+  siteBase = `http://127.0.0.1:${siteServer.address().port}`;
+  process.env.ALLOW_PRIVATE_HOSTS = '1';
   process.env.OPENAI_BASE_URL = `http://127.0.0.1:${mock.address().port}/v1`;
   server = require('../server');
   await new Promise(r => server.listen(0, r));
   base = `http://localhost:${server.address().port}`;
 });
-test.after(() => { server.close(); mock.close(); });
+test.after(() => { server.close(); mock.close(); siteServer.close(); });
 
 async function call(method, path, body) {
   const res = await fetch(base + '/api' + path, {
@@ -68,6 +89,7 @@ async function call(method, path, body) {
   return { status: res.status, data: await res.json().catch(() => ({})) };
 }
 async function settle() {
+  await new Promise(r => setTimeout(r, 30));
   for (let i = 0; i < 100; i++) {
     const s = (await call('GET', `/projects/${pid}/status`)).data;
     if (!s.busy) return s;
@@ -76,14 +98,26 @@ async function settle() {
   throw new Error('AI job did not finish');
 }
 
-test('business summary comes from the model and the page reports AI as on', async () => {
+test('reading the site builds a stored service catalogue that the page can show', async () => {
   assert.equal((await call('GET', '/config')).data.aiEnabled, true);
+  assert.equal((await call('GET', '/config')).data.maxPages, 50);
   await call('POST', '/auth/register', { email: 'o@x.test', name: 'O', password: 'longenough1' });
-  pid = (await call('POST', '/projects', { name: 'NRI tax', description: 'NRI tax consultancy in Mumbai', offerings: 'NRI tax filing', seeds: 'nri tax consultant', exclude: 'dyson', serviceArea: 'India' })).data.id;
+  pid = (await call('POST', '/projects', { name: 'NRI tax', url: siteBase, description: 'NRI tax consultancy in Mumbai', offerings: 'NRI tax filing', seeds: 'nri tax consultant', exclude: 'dyson', serviceArea: 'India' })).data.id;
   const r = await call('POST', `/projects/${pid}/analyze`, {});
   assert.equal(r.status, 200);
-  assert.equal(r.data.profile.summary, 'Test summary of the business.');
-  assert.deepEqual(r.data.profile.notOffered, ['visa help']);
+  assert.equal(r.data.analysis.status, 'running');
+  await settle();
+  const p = (await call('GET', `/projects/${pid}`)).data;
+  assert.equal(p.analysis.status, 'done');
+  assert.equal(p.analysis.pagesRead, 3);
+  assert.equal(p.analysis.services, 2);
+  assert.equal(p.profile.summary, 'Test summary of the business.');
+  assert.deepEqual(p.profile.notOffered, ['visa help']);
+  assert.deepEqual(p.profile.services.map(s => s.name), ['NRI tax filing', 'Property sale tax']);
+  assert.ok(!('knowledge' in p), 'the stored page text is not sent to the browser');
+  const cat = calls.find(c => c.kind === 'catalogue');
+  assert.match(cat.user, /Pages read \(3\)/);
+  assert.match(cat.user, /Property sale tax for NRIs/, 'the crawled page text reaches the model');
 });
 
 test('a large upload is checked in chunks, shaky answers get a second opinion, progress is visible', async () => {
@@ -93,6 +127,7 @@ test('a large upload is checked in chunks, shaky answers get a second opinion, p
   assert.equal(r.status, 200);
   const first = r.data.project.batches[0];
   assert.equal(first.ai.status, 'running');
+  assert.equal(first.ai.stage, 'keywords');
   assert.equal(first.ai.total > 100, true);
 
   await settle();
@@ -117,7 +152,10 @@ test('a large upload is checked in chunks, shaky answers get a second opinion, p
   assert.match(kw['unsure tax thing'].reason, /^Unsure:/);
   assert.equal(kw['maybe unsure nri query'].category, 'review');
 
+  assert.equal(best.service, 'NRI tax filing', 'each keyword is matched to a service from the site');
   const judgeCalls = calls.filter(c => c.kind === 'judge');
+  assert.match(judgeCalls[0].user, /SERVICES ON THE WEBSITE[\s\S]*- NRI tax filing \(https:\/\/site.test\/services\/nri-filing\)/, 'the stored catalogue is part of every check');
+  assert.match(judgeCalls[0].user, /WEBSITE PAGES CLOSEST TO THESE QUERIES[\s\S]*NRI tax filing service/, 'the closest stored pages are included');
   assert.ok(judgeCalls.length >= 2, 'more than 100 keywords means more than one call');
   assert.ok(judgeCalls.every(c => c.n <= 100));
   assert.ok(calls.some(c => c.kind === 'verify'), 'low confidence answers were re-checked');
@@ -178,6 +216,7 @@ test('a wrong key is reported plainly and the rules result is kept; re-check wor
 
 test('editing the business marks earlier AI checks as out of date; a cut-short job is flagged', async () => {
   await call('POST', `/projects/${pid}/analyze`, { description: 'NRI tax consultancy in Mumbai and Pune' });
+  await settle();
   const p = (await call('GET', `/projects/${pid}`)).data;
   assert.ok(p.batches.some(b => b.ai.status === 'done' && b.stale));
 
@@ -187,4 +226,66 @@ test('editing the business marks earlier AI checks as out of date; a cut-short j
   store.put(raw);
   const after = (await call('GET', `/projects/${pid}`)).data;
   assert.equal(after.batches[0].ai.status, 'interrupted');
+});
+
+test('the landing page for an upload is read and used, and a bad page does not stop the analysis', async () => {
+  const r = await call('POST', `/projects/${pid}/uploads`, { text: 'nri capital gains on property\nnri property sale tax', name: 'Property page', pageUrl: siteBase + '/services/property-tax' });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.project.batches.find(b => b.id === r.data.batchId).pageUrl, siteBase + '/services/property-tax');
+  await settle();
+  const judge = calls.filter(c => c.kind === 'judge').pop();
+  assert.match(judge.user, /LANDING PAGE FOR THIS UPLOAD\nURL: http:\/\/127\.0\.0\.1:\d+\/services\/property-tax\nTitle: Property sale tax for NRIs/);
+  assert.match(judge.user, /Capital gains planning when an NRI sells property/);
+  const p = (await call('GET', `/projects/${pid}`)).data;
+  const b = p.batches.find(x => x.id === r.data.batchId);
+  assert.equal(b.page.status, 'ok');
+  assert.equal(b.page.title, 'Property sale tax for NRIs');
+  assert.ok(!('text' in b.page), 'the page text is kept on the server');
+  assert.equal(p.keywords.find(k => k.keyword === 'nri property sale tax').service, 'Property sale tax');
+
+  const bad = await call('POST', `/projects/${pid}/uploads`, { text: 'nri return filing help', name: 'Broken page', pageUrl: siteBase + '/missing' });
+  await settle();
+  const p2 = (await call('GET', `/projects/${pid}`)).data;
+  const b2 = p2.batches.find(x => x.id === bad.data.batchId);
+  assert.equal(b2.ai.status, 'done');
+  assert.match(b2.ai.note, /Could not read the landing page/);
+  assert.equal(b2.page.status, 'error');
+  assert.equal(p2.keywords.find(k => k.keyword === 'nri return filing help').source, 'ai');
+
+  assert.equal((await call('POST', `/projects/${pid}/uploads`, { text: 'x y', pageUrl: 'not a url at all' })).status, 400);
+
+  // Changing the landing page later analyses the upload again against the new page
+  const moved = await call('PATCH', `/projects/${pid}/uploads/${bad.data.batchId}`, { pageUrl: siteBase + '/services/nri-filing' });
+  assert.equal(moved.status, 200);
+  await settle();
+  const p3 = (await call('GET', `/projects/${pid}`)).data;
+  assert.equal(p3.batches.find(x => x.id === bad.data.batchId).page.title, 'NRI tax filing service');
+});
+
+test('uploads wait in line, one at a time, and keep their order', async () => {
+  order.length = 0;
+  const a = await call('POST', `/projects/${pid}/uploads`, { text: 'slowkw nri one', name: 'Slow one' });
+  const b = await call('POST', `/projects/${pid}/uploads`, { text: 'fastkw nri two', name: 'Fast one' });
+  assert.equal(a.data.project.batches.find(x => x.id === a.data.batchId).ai.status, 'running');
+  assert.equal(b.data.project.batches.find(x => x.id === b.data.batchId).ai.status, 'queued');
+  await settle();
+  assert.deepEqual(order, ['slow-start', 'slow-end', 'fast'], 'the second upload did not start until the first finished');
+  const p = (await call('GET', `/projects/${pid}`)).data;
+  assert.ok(p.batches.filter(x => ['Slow one', 'Fast one'].includes(x.name)).every(x => x.ai.status === 'done'));
+});
+
+test('a site that cannot be read is reported, and a cut-short read is flagged', async () => {
+  const other = (await call('POST', '/projects', { name: 'Broken', url: siteBase + '/nothing-here' })).data.id;
+  await call('POST', `/projects/${other}/analyze`, {});
+  for (let i = 0; i < 50; i++) { const st = (await call('GET', `/projects/${other}/status`)).data; if (st.analysis.status !== 'running') break; await new Promise(r => setTimeout(r, 100)); }
+  const p = (await call('GET', `/projects/${other}`)).data;
+  assert.equal(p.analysis.status, 'error');
+  assert.match(p.analysis.error, /Could not read the website/);
+  assert.ok(!p.profile);
+
+  const store = require('../lib/db');
+  const raw = store.get(other);
+  raw.analysis = { status: 'running', done: 4, total: 50 };
+  store.put(raw);
+  assert.equal((await call('GET', `/projects/${other}`)).data.analysis.status, 'interrupted');
 });

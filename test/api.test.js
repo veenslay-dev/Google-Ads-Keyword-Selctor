@@ -57,6 +57,14 @@ function client() {
 }
 
 const sitePort = s => s.address().port;
+async function analysed(c, id) {
+  for (let i = 0; i < 100; i++) {
+    const st = (await c('GET', `/projects/${id}/status`)).data;
+    if (!st.analysis || st.analysis.status !== 'running') return st.analysis;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  throw new Error('analysis did not finish');
+}
 let owner, editor, viewer, stranger, pid;
 
 test('sign-up, login and access control', async () => {
@@ -86,7 +94,14 @@ test('projects are private until shared, and roles are enforced', async () => {
   });
   assert.equal(created.status, 201);
   pid = created.data.id;
-  assert.equal((await owner('POST', `/projects/${pid}/analyze`, {})).status, 200);
+  const started = await owner('POST', `/projects/${pid}/analyze`, {});
+  assert.equal(started.status, 200);
+  assert.equal(started.data.analysis.status, 'running', 'the page is answered at once while the site is read in the background');
+  assert.equal((await owner('POST', `/projects/${pid}/analyze`, {})).status, 409, 'a second run is refused while one is going');
+  const done = await analysed(owner, pid);
+  assert.equal(done.status, 'done');
+  assert.ok(done.pagesRead >= 1);
+  assert.ok((await owner('GET', `/projects/${pid}`)).data.profile.topTerms.length > 0);
 
   assert.equal((await stranger('GET', `/projects/${pid}`)).status, 404);
   assert.deepEqual((await stranger('GET', '/projects')).data, []);
