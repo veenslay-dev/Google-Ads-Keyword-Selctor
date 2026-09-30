@@ -1,5 +1,7 @@
 'use strict';
 
+// Set by the server when the app is mounted under a path such as /keyword-selector.
+const BASE = (document.querySelector('meta[name=base]') || {}).content || '';
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const CATS = [['priority', 'Priority'], ['relevant', 'Relevant'], ['review', 'Review'], ['negative', 'Negative']];
@@ -7,7 +9,7 @@ const CATS = [['priority', 'Priority'], ['relevant', 'Relevant'], ['review', 'Re
 const state = { config: { aiEnabled: false, maxKeywords: 1000, maxCompetitors: 3 }, user: null, projects: [], project: null, tab: 'brief', filter: 'all', search: '', sort: { key: 'score', dir: 'desc' }, st: { filter: 'all', search: '', sort: { key: 'cost', dir: 'desc' } } };
 
 async function api(path, opts = {}) {
-  const res = await fetch('/api' + path, {
+  const res = await fetch(BASE + '/api' + path, {
     method: opts.method || 'GET',
     headers: { 'x-csrf': '1', ...(opts.body ? { 'content-type': 'application/json' } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -336,14 +338,14 @@ function renderResults() {
     </div>
     <div class="exports">
       <span class="label">Download</span>
-      <a class="btn small" href="/api/projects/${p.id}/export?type=all">Everything</a>
-      <a class="btn small" href="/api/projects/${p.id}/export?type=priority">Priority</a>
-      <a class="btn small" href="/api/projects/${p.id}/export?type=negative">Negative</a>
+      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=all">Everything</a>
+      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=priority">Priority</a>
+      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=negative">Negative</a>
       <span class="grow"></span>
       <span class="label">Google Ads Editor</span>
       <input type="text" id="camp" value="${esc(p.campaign || p.name)}" aria-label="Campaign name">
-      <a class="btn small" id="dl-t" href="/api/projects/${p.id}/export?type=ads-targeting&campaign=${q}">Search targeting</a>
-      <a class="btn small" id="dl-n" href="/api/projects/${p.id}/export?type=ads-negatives&campaign=${q}">Negatives</a>
+      <a class="btn small" id="dl-t" href="${BASE}/api/projects/${p.id}/export?type=ads-targeting&campaign=${q}">Search targeting</a>
+      <a class="btn small" id="dl-n" href="${BASE}/api/projects/${p.id}/export?type=ads-negatives&campaign=${q}">Negatives</a>
     </div>
     <div class="tablewrap"><table>
       <thead><tr>${[['keyword', 'Keyword'], ['category', 'Category'], ['score', 'Score', 1], ['intent', 'Intent'], ['volume', 'Searches', 1], ['bid', 'Bid', 1], ['matchType', 'Match type'], ['reason', 'Why']]
@@ -353,7 +355,7 @@ function renderResults() {
       <div><h2>Account-level negative words</h2>
         <p class="sub" style="margin-bottom:10px">Words that keep turning up in your negatives and never in your site. Good candidates for a shared negative list.</p>
         <div class="chips">${(p.negativeWords || []).map(w => `<span class="chip neg">${esc(w.word)}<small>${w.count}</small></span>`).join('') || '<span class="sub">Nothing repeats yet.</span>'}</div>
-        ${(p.negativeWords || []).length ? `<p><a class="btn small" style="text-decoration:none;color:inherit" href="/api/projects/${p.id}/export?type=negative-words&campaign=${q}">Download as negative list</a></p>` : ''}
+        ${(p.negativeWords || []).length ? `<p><a class="btn small" style="text-decoration:none;color:inherit" href="${BASE}/api/projects/${p.id}/export?type=negative-words&campaign=${q}">Download as negative list</a></p>` : ''}
       </div>
       <div><h2>Ad group ideas</h2>
         <p class="sub" style="margin-bottom:10px">Priority and relevant keywords grouped by their strongest shared term. A starting point, not a final structure.</p>
@@ -371,8 +373,8 @@ function renderResults() {
   $('#search').oninput = e => { state.search = e.target.value; drawRows(); };
   $('#camp').oninput = e => {
     const v = encodeURIComponent(e.target.value);
-    $('#dl-t').href = `/api/projects/${p.id}/export?type=ads-targeting&campaign=${v}`;
-    $('#dl-n').href = `/api/projects/${p.id}/export?type=ads-negatives&campaign=${v}`;
+    $('#dl-t').href = `${BASE}/api/projects/${p.id}/export?type=ads-targeting&campaign=${v}`;
+    $('#dl-n').href = `${BASE}/api/projects/${p.id}/export?type=ads-negatives&campaign=${v}`;
   };
   $('#camp').onchange = e => guard(() => api('/projects/' + p.id, { method: 'PUT', body: { campaign: e.target.value } }));
   $('#reset').onclick = () => guard(async () => {

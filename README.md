@@ -24,6 +24,7 @@ Optional environment variables:
 - `DATA_DIR` where the SQLite database `app.db` lives (default `./data`)
 - `DB_PATH` full path to the database file, or `:memory:` for tests
 - `ALLOW_SIGNUP=0` closes public sign-up once the first account exists (see Accounts)
+- `BASE_PATH` mounts the app under a path on an existing site, for example `/keyword-selector`. It works whether or not your web server strips the prefix, and the login cookie is limited to that path.
 - `COOKIE_SECURE=1` marks the session cookie Secure. Set it whenever the app is served over HTTPS.
 - `ANTHROPIC_API_KEY` turns on the AI layer (see below)
 - `ANTHROPIC_MODEL` overrides the model used for that layer

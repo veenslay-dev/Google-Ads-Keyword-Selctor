@@ -15,6 +15,9 @@ const { extractKeywords, MAX_KEYWORDS } = require('./lib/sheet');
 const { toCsv } = require('./lib/csv');
 
 const PORT = Number(process.env.PORT) || 3000;
+// Optional mount point, for example BASE_PATH=/keyword-selector. Works whether or not the proxy strips it.
+const BASE = (process.env.BASE_PATH || '').replace(/\/+$/, '').replace(/^(?!\/)(?=.)/, '/');
+const stripBase = p => (BASE && (p === BASE || p.startsWith(BASE + '/')) ? p.slice(BASE.length) || '/' : p);
 const PUBLIC = path.join(__dirname, 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 const CATEGORIES = ['priority', 'relevant', 'review', 'negative'];
@@ -512,12 +515,17 @@ function serveStatic(req, res, url) {
     res.writeHead(404, { 'content-type': 'text/plain' });
     return res.end('Not found');
   }
+  if (file.endsWith('index.html')) {
+    res.writeHead(200, { 'content-type': TYPES['.html'] });
+    return res.end(fs.readFileSync(file, 'utf8').replaceAll('%BASE%', BASE));
+  }
   res.writeHead(200, { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream' });
   fs.createReadStream(file).pipe(res);
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  url.pathname = stripBase(url.pathname);
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
   try {
     if (url.pathname.startsWith('/api/')) await api(req, res, url);

@@ -189,8 +189,8 @@ function renderTerms() {
     <div class="exports">
       <span class="label">Download</span>
       <input type="text" class="keep" id="st-camp" value="${esc(p.campaign || p.name)}" aria-label="Campaign name">
-      <a class="btn small" id="st-dl-n" href="/api/projects/${p.id}/export?type=st-negatives&campaign=${q}">Negatives for Google Ads Editor</a>
-      <a class="btn small" href="/api/projects/${p.id}/export?type=st-all">Full report with verdicts</a>
+      <a class="btn small" id="st-dl-n" href="${BASE}/api/projects/${p.id}/export?type=st-negatives&campaign=${q}">Negatives for Google Ads Editor</a>
+      <a class="btn small" href="${BASE}/api/projects/${p.id}/export?type=st-all">Full report with verdicts</a>
       <span class="grow"></span>
       <button class="btn small ed" id="st-win" ${s.addCount ? '' : 'disabled'}>Add ${s.addCount} winner${s.addCount === 1 ? '' : 's'} to keywords</button>
       <button class="btn small ed" id="st-replace">Replace report</button>
@@ -207,7 +207,7 @@ function renderTerms() {
     renderTerms(); lockIfViewer();
   }));
   $('#st-search').oninput = e => { state.st.search = e.target.value; drawTermRows(); lockIfViewer(); };
-  $('#st-camp').oninput = e => { $('#st-dl-n').href = `/api/projects/${p.id}/export?type=st-negatives&campaign=${encodeURIComponent(e.target.value)}`; };
+  $('#st-camp').oninput = e => { $('#st-dl-n').href = `${BASE}/api/projects/${p.id}/export?type=st-negatives&campaign=${encodeURIComponent(e.target.value)}`; };
   $('#st-camp').onchange = e => guard(() => api('/projects/' + p.id, { method: 'PUT', body: { campaign: e.target.value } }));
   $('#st-replace').onclick = () => { state.st.replacing = true; renderTerms(); lockIfViewer(); };
   $('#st-clear').onclick = () => {
