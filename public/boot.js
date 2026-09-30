@@ -18,6 +18,14 @@ window.addEventListener('popstate', () => { if (state.user) route(); });
 
 guard(async () => {
   state.config = await api('/config');
+  if (state.config.apiVersion !== EXPECTED_API) {
+    // The page files update the moment they are pulled, but the server only changes when it restarts.
+    const bar = document.createElement('div');
+    bar.className = 'versionbar';
+    bar.setAttribute('role', 'alert');
+    bar.textContent = 'The server is still running an older version than this page. Restart it to finish updating, then reload. Until then some things will not work.';
+    document.body.prepend(bar);
+  }
   const me = await api('/auth/me');
   if (me.user) await startApp(me.user); else showAuth();
 });

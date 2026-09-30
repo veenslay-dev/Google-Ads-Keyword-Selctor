@@ -25,6 +25,8 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 const CATEGORIES = ['priority', 'relevant', 'review', 'negative'];
 const RANK = { viewer: 1, editor: 2, owner: 3 };
 const MAX_PROJECT_KEYWORDS = 20000;
+// Bumped when the pages need something new from the server. The page compares it and asks for a restart if the server is behind.
+const API_VERSION = 3;
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'same-origin',
@@ -82,8 +84,8 @@ const countsOf = rows => {
 // Project addresses: /projects/<slug>. Stable once made, unique among the projects one person owns.
 const PROJECT_SLUG = { reserved: { new: 'new-project' }, fallback: 'project' };
 
-function ensureSlug(p) {
-  if (p.slug) return false;
+function ensureSlug(p, force = false) {
+  if (p.slug && !force) return false;
   const owner = store.ownerOf(p.id);
   const taken = new Set(owner ? store.listFor(owner).filter(r => r.role === 'owner' && r.project.id !== p.id).map(r => r.project.slug).filter(Boolean) : []);
   p.slug = uniqueSlug(p.name, taken, PROJECT_SLUG);
@@ -227,7 +229,7 @@ async function api(req, res, url) {
   if (method !== 'GET' && method !== 'HEAD' && req.headers['x-csrf'] !== '1') throw new HttpError(403, 'Missing request header. Reload the page and try again.');
 
   if (parts[0] === 'config') {
-    return json({ aiEnabled: openai.enabled(), maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, maxPages: MAX_SITE_PAGES, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
+    return json({ apiVersion: API_VERSION, aiEnabled: openai.enabled(), maxKeywords: MAX_KEYWORDS, maxCompetitors: MAX_COMPETITORS, maxPages: MAX_SITE_PAGES, signupOpen: process.env.ALLOW_SIGNUP !== '0' || store.userCount() === 0 });
   }
   if (parts[0] === 'auth') return authRoutes(req, res, parts, json);
 
@@ -275,11 +277,34 @@ async function api(req, res, url) {
       const b = await readBody(req);
       const before = JSON.stringify([p.exclude, p.strictness, p.blockCompetitors]);
       applyFields(p, b);
+      if (b.renameSlug) {
+        // The address is shared with everyone who has the project, so only the owner may change it.
+        if (role !== 'owner') throw new HttpError(403, 'Only the project owner can change the web address.');
+        ensureSlug(p, true);
+      }
       if (JSON.stringify([p.exclude, p.strictness, p.blockCompetitors]) !== before) pipeline.rescore(p);
       store.put(p);
       return json(publicProject(p, role));
     }
     if (method === 'DELETE') { need('owner'); store.remove(pid); return json({ ok: true }); }
+  }
+
+  // A new project with the same business details, campaigns and what was learned from the website,
+  // but none of the keywords. Saves re-reading the site for a similar client or a second account.
+  if (sub === 'duplicate' && method === 'POST') {
+    need('editor');
+    const src = load(pid);
+    const clone = x => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
+    const copy = {
+      id: store.id(), name: `${src.name} (copy)`.slice(0, 100), url: src.url, description: src.description, offerings: src.offerings, serviceArea: src.serviceArea || '',
+      seeds: [...(src.seeds || [])], exclude: [...(src.exclude || [])], strictness: src.strictness, blockCompetitors: src.blockCompetitors !== false,
+      competitors: clone(src.competitors) || [], competitorBrands: clone(src.competitorBrands) || [], profile: clone(src.profile) || null, knowledge: clone(src.knowledge),
+      campaigns: (src.campaigns || []).map(c => ({ ...c, id: store.id() })), batches: [], keywords: [], createdAt: new Date().toISOString(),
+    };
+    const mine = store.listFor(user.id).filter(r => r.role === 'owner').map(r => r.project.slug).filter(Boolean);
+    copy.slug = uniqueSlug(copy.name, new Set(mine), PROJECT_SLUG);
+    store.create(copy, user.id);
+    return json({ id: copy.id, project: publicProject(copy, 'owner') }, 201);
   }
 
   // Cheap enough to poll every couple of seconds while AI is working.

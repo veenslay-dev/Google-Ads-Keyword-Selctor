@@ -155,9 +155,67 @@ test('changing a campaign landing page marks its uploads out of date, viewers ca
   assert.equal((await ann('GET', `/projects/${pid}`)).data.batches.find(x => x.id === b.id).stale, false);
   const after = await ann('PATCH', `/projects/${pid}/campaigns/${camp.id}`, { pageUrl: 'https://example.com/new-page' });
   assert.equal(after.data.batches.find(x => x.id === b.id).stale, true);
+  const tidy = store.get(pid); tidy.profile = null; store.put(tidy); // the stand-in profile was only for this check
 
   await ann('POST', `/projects/${pid}/members`, { email: 'bob@x.test', role: 'viewer' });
   assert.equal((await bob('POST', `/projects/${pid}/campaigns`, { name: 'Sneaky' })).status, 403);
   assert.equal((await bob('PATCH', `/projects/${pid}/campaigns/${camp.id}`, { name: 'Hacked' })).status, 403);
   assert.equal((await bob('DELETE', `/projects/${pid}/campaigns/${camp.id}`)).status, 403);
+});
+
+test('project options: edit, change the address (owner only), duplicate, delete', async () => {
+  const carol = client();
+  await signup(carol, 'Carol');
+  await ann('POST', `/projects/${pid}/members`, { email: 'carol@x.test', role: 'editor' });
+  assert.equal((await ann('GET', '/config')).data.apiVersion, 3);
+
+  const before = (await ann('GET', `/projects/${pid}`)).data;
+  assert.equal(before.slug, 'dinesh-aarjav-nri-tax');
+
+  // Renaming keeps the address by default, so links people already hold keep working
+  const plain = await ann('PUT', `/projects/${pid}`, { name: 'Fresh Name', url: 'https://example.com' });
+  assert.equal(plain.data.name, 'Fresh Name');
+  assert.equal(plain.data.url, 'https://example.com/');
+  assert.equal(plain.data.slug, 'dinesh-aarjav-nri-tax');
+
+  // An editor can edit but not change the address
+  assert.equal((await carol('PUT', `/projects/${pid}`, { name: 'Carol name' })).status, 200);
+  assert.equal((await carol('PUT', `/projects/${pid}`, { name: 'Carol again', renameSlug: true })).status, 403);
+  assert.equal((await bob('PUT', `/projects/${pid}`, { name: 'Bob' })).status, 403, 'a viewer cannot edit');
+
+  // The owner can, and the new address is unique among their projects
+  await ann('PUT', `/projects/${pid}`, { name: 'Fresh Name' });
+  const moved = await ann('PUT', `/projects/${pid}`, { renameSlug: true });
+  assert.equal(moved.data.slug, 'fresh-name');
+  assert.ok((await ann('GET', '/projects')).data.some(p => p.slug === 'fresh-name'));
+  const other = (await ann('POST', '/projects', { name: 'Fresh Name' })).data;
+  assert.equal(other.slug, 'fresh-name-2');
+
+  // Duplicate: business details and campaigns come along, keywords do not, the copy belongs to whoever asked
+  assert.equal((await ann('PUT', `/projects/${pid}`, { description: 'Plumber in Leeds', seeds: 'boiler repair', exclude: 'dyson', serviceArea: 'Leeds' })).status, 200);
+  const src = (await ann('GET', `/projects/${pid}`)).data;
+  assert.ok(src.keywords.length > 0 && src.campaigns.length > 0);
+  assert.equal((await bob('POST', `/projects/${pid}/duplicate`)).status, 403, 'a viewer cannot copy a project');
+  const dup = await carol('POST', `/projects/${pid}/duplicate`);
+  assert.equal(dup.status, 201);
+  const copy = dup.data.project;
+  assert.equal(copy.name, 'Fresh Name (copy)');
+  assert.equal(copy.slug, 'fresh-name-copy');
+  assert.equal(copy.role, 'owner');
+  assert.equal(copy.keywords.length, 0);
+  assert.equal(copy.batches.length, 0);
+  assert.equal(copy.campaigns.length, src.campaigns.length);
+  assert.notEqual(copy.campaigns[0].id, src.campaigns[0].id);
+  assert.equal(copy.campaigns[0].name, src.campaigns[0].name);
+  assert.equal(copy.description, 'Plumber in Leeds');
+  assert.deepEqual(copy.exclude, ['dyson']);
+  assert.equal(copy.serviceArea, 'Leeds');
+  assert.equal((await ann('GET', `/projects/${dup.data.id}`)).status, 404, 'the owner of the original does not get the copy');
+  assert.equal((await carol('GET', '/projects')).data.length, 2, 'Carol sees the original and her copy');
+
+  // Delete is for owners only
+  assert.equal((await carol('DELETE', `/projects/${pid}`)).status, 403);
+  assert.equal((await carol('DELETE', `/projects/${dup.data.id}`)).status, 200);
+  assert.equal((await ann('DELETE', `/projects/${other.id}`)).status, 200);
+  assert.ok(!(await ann('GET', '/projects')).data.some(p => p.id === other.id));
 });

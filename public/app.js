@@ -18,6 +18,8 @@ const state = {
   up: { open: false, mode: 'files', files: [], name: '', url: '', text: '' },
   goAfterRead: false, expanded: new Set(), fromRoute: false,
 };
+// The page asks the server which version it is. A server that was not restarted after an update reports an older one.
+const EXPECTED_API = 3;
 const busyAI = b => b.ai && (b.ai.status === 'running' || b.ai.status === 'queued');
 const reading = p => Boolean(p && p.analysis && p.analysis.status === 'running');
 
@@ -233,12 +235,13 @@ function renderProjects() {
       <button class="btn primary" id="startNew">${I('plus')} New project</button></div>
     <div class="pgrid">${state.projects.map(p => {
       const c = p.counts;
-      const who = p.role === 'owner' ? (p.shared ? 'Shared' : '') : `${p.role} · ${p.ownerName}`;
-      return `<a class="pcard" href="${href('/projects/' + p.slug)}" data-link>
-        <span class="pcard-top"><span class="pico">${I('bolt')}</span><span><h3>${esc(p.name)}</h3><span class="purl">${esc(p.url ? prettyUrl(p.url) : 'No website added')}</span></span></span>
-        <span class="ucounts">${miniBar(c)}${nums(c)}</span>
-        <span class="pcard-stats"><span><b>${p.total}</b> keywords</span><span><b>${p.campaigns}</b> campaign${p.campaigns === 1 ? '' : 's'}</span>${who ? `<span class="role">${esc(who)}</span>` : ''}</span>
-      </a>`;
+      const who = p.role === 'owner' ? (p.shared ? 'Shared' : '') : `${p.role} \u00b7 ${p.ownerName}`;
+      return `<div class="pcard">
+        <a class="pcard-link" href="${href('/projects/' + p.slug)}" data-link>
+          <span class="pcard-top"><span class="pico">${I('bolt')}</span><span class="pcard-name"><h3>${esc(p.name)}</h3><span class="purl">${esc(p.url ? prettyUrl(p.url) : 'No website added')}</span></span></span>
+          <span class="ucounts">${miniBar(c)}${nums(c)}</span>
+          <span class="pcard-stats"><span><b>${p.total}</b> keywords</span><span><b>${p.campaigns ?? 0}</b> campaign${p.campaigns === 1 ? '' : 's'}</span>${who ? `<span class="role">${esc(who)}</span>` : ''}</span>
+        </a>${projectMenu(p)}</div>`;
     }).join('')}</div>`;
   $('#startNew').onclick = () => go('/projects/new');
 }
@@ -278,7 +281,7 @@ function drawSidebar() {
   const item = (icon, label, path, on, count) => `<a class="sitem ${on ? 'on' : ''}" href="${href(path)}" data-link ${on ? 'aria-current="page"' : ''}>${I(icon)}<span>${esc(label)}</span>${count != null ? `<b>${count}</b>` : ''}</a>`;
   el.innerHTML = `
     <a href="${href('/projects')}" class="back" data-link>${I('left')} All projects</a>
-    <div class="sid"><span class="pico sm">${I('bolt')}</span><div class="sidtext"><b>${esc(p.name)}</b>${p.url ? `<a class="purl" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(prettyUrl(p.url))} ${I('external')}</a>` : '<span class="purl muted">No website yet</span>'}</div></div>
+    <div class="sid"><span class="pico sm">${I('bolt')}</span><div class="sidtext"><b>${esc(p.name)}</b>${p.url ? `<a class="purl" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(prettyUrl(p.url))} ${I('external')}</a>` : '<span class="purl muted">No website yet</span>'}</div>${projectMenu(entryOf(p))}</div>
     <nav class="snav" aria-label="Project">
       <p class="shead">Keywords</p>
       ${item('list', 'All keywords', root, state.view === 'keywords', p.counts.total)}
@@ -312,6 +315,125 @@ function renderProject() {
   else renderAllKeywords();
   lockIfViewer();
   pollIfBusy();
+}
+
+/* ---------- project actions: edit, duplicate, download, leave, delete ---------- */
+// What the menu needs to know about a project, from the list entry or from an open project.
+function entryOf(p) {
+  const listed = state.projects.find(x => x.id === p.id) || {};
+  return { id: p.id, name: p.name, url: p.url, slug: projectSlug(p), role: p.role, total: p.counts.total, campaigns: p.campaigns.length, shared: Boolean(listed.shared) };
+}
+
+function projectMenu(e) {
+  const editor = e.role !== 'viewer', owner = e.role === 'owner';
+  return `<details class="menu pmenu"><summary aria-label="Actions for ${esc(e.name)}">${I('dots')}</summary><div class="menu-pop">
+      <a href="${href('/projects/' + e.slug)}" data-link>${I('folder')} Open project</a>
+      ${editor ? `<button data-act="edit" data-id="${e.id}">${I('pencil')} Edit name and website</button>` : ''}
+      <a href="${href('/projects/' + e.slug + '/business')}" data-link>${I('building')} Business details</a>
+      <a href="${href('/projects/' + e.slug + '/team')}" data-link>${I('users')} Team and sharing</a>
+      <a href="${BASE}/api/projects/${e.id}/export?type=all">${I('download')} Download every keyword (CSV)</a>
+      ${editor ? `<button data-act="duplicate" data-id="${e.id}">${I('file')} Make a copy without keywords</button>` : ''}
+      <hr>
+      ${owner ? `<button class="danger" data-act="delete" data-id="${e.id}">${I('trash')} Delete project</button>` : `<button class="danger" data-act="leave" data-id="${e.id}">${I('logout')} Leave project</button>`}
+    </div></details>`;
+}
+
+function findEntry(id) {
+  const open = state.project && state.project.id === id ? entryOf(state.project) : null;
+  return open || state.projects.find(x => x.id === id);
+}
+
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-act]');
+  if (!b) return;
+  const e = findEntry(b.dataset.id);
+  const menu = b.closest('details.menu');
+  if (menu) menu.open = false;
+  if (!e) return;
+  if (b.dataset.act === 'edit') editProjectDialog(e);
+  else if (b.dataset.act === 'delete') deleteProjectDialog(e);
+  else if (b.dataset.act === 'duplicate') guard(async () => {
+    const r = await api(`/projects/${e.id}/duplicate`, { method: 'POST' });
+    await refreshList();
+    toast(`Made "${r.project.name}". It has the business details and campaigns, and no keywords.`);
+    go('/projects/' + (state.slugs[r.id] || r.project.slug));
+  });
+  else if (b.dataset.act === 'leave') {
+    if (!confirm(`Leave "${e.name}"? You will lose access until someone adds you again.`)) return;
+    guard(async () => { await api(`/projects/${e.id}/leave`, { method: 'POST' }); await refreshList(); goProjects(); toast(`You left "${e.name}".`); });
+  }
+});
+
+// A menu inside the sidebar would be clipped by the sidebar's own scrolling, so it opens at fixed coordinates.
+document.addEventListener('toggle', ev => {
+  const d = ev.target;
+  if (!d.matches || !d.matches('details.menu') || !d.open || !d.closest('.side')) return;
+  const pop = d.querySelector('.menu-pop'), r = d.querySelector('summary').getBoundingClientRect();
+  pop.style.position = 'fixed';
+  pop.style.top = r.bottom + 6 + 'px';
+  pop.style.right = 'auto';
+  pop.style.left = Math.max(12, Math.min(r.left, window.innerWidth - pop.offsetWidth - 12)) + 'px';
+}, true);
+window.addEventListener('scroll', () => document.querySelectorAll('.side details.menu[open]').forEach(d => { d.open = false; }), { passive: true });
+
+function editProjectDialog(e) {
+  const dlg = $('#modal');
+  const owner = e.role === 'owner';
+  dlg.innerHTML = `
+    <form class="dlg" method="dialog">
+      <h2>Edit project</h2>
+      <div class="field"><label for="ep-name">Project name</label><input type="text" id="ep-name" value="${esc(e.name)}"></div>
+      <div class="field" style="margin-top:14px"><label for="ep-url">Website</label><input type="text" id="ep-url" value="${esc(e.url || '')}" placeholder="example.com">
+        <span class="hint">Changing the website does not read it again. Use Business, then "Save and re-read the website", when you want that.</span></div>
+      ${owner ? `<label class="check" style="margin-top:16px;font-weight:500"><input type="checkbox" id="ep-slug"> Also change the web address to match the name</label>
+        <p class="hint" style="margin:4px 0 0 26px">Now <b>${esc(BASE + '/projects/' + e.slug)}</b>. Links people already have to the old address will stop working.</p>` : ''}
+      <p class="autherr" id="ep-err" role="alert"></p>
+      <div class="actions"><button class="btn primary" id="ep-save" value="save">Save changes</button><button class="btn" value="cancel">Cancel</button></div>
+    </form>`;
+  dlg.showModal();
+  $('#ep-name').focus();
+  $('#ep-save').onclick = async ev => {
+    ev.preventDefault();
+    const name = $('#ep-name').value.trim();
+    if (!name) { $('#ep-err').textContent = 'Give the project a name.'; return; }
+    try {
+      const body = { name, url: $('#ep-url').value };
+      if ($('#ep-slug') && $('#ep-slug').checked) body.renameSlug = true;
+      const r = await api('/projects/' + e.id, { method: 'PUT', body });
+      await refreshList();
+      dlg.close();
+      if (state.project && state.project.id === e.id) { state.project = r; state.fromRoute = true; }
+      render();
+      toast('Saved.');
+    } catch (err) { $('#ep-err').textContent = err.message; }
+  };
+}
+
+function deleteProjectDialog(e) {
+  const dlg = $('#modal');
+  dlg.innerHTML = `
+    <form class="dlg" method="dialog">
+      <h2>Delete "${esc(e.name)}"?</h2>
+      <p>This permanently deletes the project, its ${e.campaigns} campaign${e.campaigns === 1 ? '' : 's'} and ${e.total.toLocaleString()} keyword${e.total === 1 ? '' : 's'}${e.shared ? ', and removes access for everyone it is shared with' : ''}. It cannot be undone.</p>
+      <p class="hint">Want a copy first? Close this and choose "Download every keyword (CSV)" from the project's menu.</p>
+      <div class="field" style="margin-top:14px"><label for="dp-confirm">Type the project name to confirm</label><input type="text" id="dp-confirm" autocomplete="off" placeholder="${esc(e.name)}"></div>
+      <p class="autherr" id="dp-err" role="alert"></p>
+      <div class="actions"><button class="btn danger-fill" id="dp-go" value="go" disabled>${I('trash')} Delete project</button><button class="btn" value="cancel">Cancel</button></div>
+    </form>`;
+  dlg.showModal();
+  const input = $('#dp-confirm'), go = $('#dp-go');
+  input.focus();
+  input.oninput = () => { go.disabled = input.value.trim().toLowerCase() !== e.name.trim().toLowerCase(); };
+  go.onclick = async ev => {
+    ev.preventDefault();
+    try {
+      await api('/projects/' + e.id, { method: 'DELETE' });
+      await refreshList();
+      dlg.close();
+      goProjects();
+      toast(`Deleted "${e.name}".`);
+    } catch (err) { $('#dp-err').textContent = err.message; }
+  };
 }
 
 /* ---------- campaign dialog ---------- */

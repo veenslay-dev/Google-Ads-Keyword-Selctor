@@ -425,3 +425,19 @@ a.btn { text-decoration: none; }
   details.usermenu .chev { display: none; }
   .menu-pop { right: -4px; }
 }
+
+/* project cards with their own menu */
+.pcard { position: relative; padding: 0; display: block; cursor: default; }
+.pcard-link { display: grid; gap: 14px; padding: 20px 22px; color: inherit; text-decoration: none; border-radius: var(--radius); }
+.pcard-top { padding-right: 44px; min-width: 0; }
+.pcard-name { min-width: 0; }
+.pcard-name h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pmenu { position: absolute; top: 16px; right: 16px; }
+.pmenu summary { width: 34px; height: 34px; }
+.pmenu .menu-pop { min-width: 280px; }
+.sid details.menu { margin-left: auto; flex: none; }
+.sid details.menu summary { width: 32px; height: 32px; }
+.btn.danger-fill { background: var(--negative); border-color: var(--negative); color: #fff; }
+.btn.danger-fill:hover:not(:disabled) { background: var(--negative); border-color: var(--negative); color: #fff; filter: brightness(.92); }
+.versionbar { background: var(--negative); color: #fff; padding: 10px 24px; text-align: center; font-weight: 600; font-size: 13.5px; }
+.pcard > details.pmenu { position: absolute; top: 16px; right: 16px; }

@@ -44,6 +44,21 @@ Environment variables:
 
 Every address works as a bookmark, a reload, and a link you can send to a teammate who has access. Back and forward behave as expected. A link opened while signed out is kept, and you land on it after signing in. Slugs are made when a project is created, stay the same if the project is renamed, and get `-2`, `-3` if you own two projects with the same name. The name "new" is reserved, so a project called New gets `new-project`. All of this works under `BASE_PATH`, for example `/keyword-selector/projects/dinesh-aarjav`.
 
+## Project options
+
+Every project has a ⋯ menu, on its card on the Projects page and at the top of its sidebar.
+
+- **Edit name and website.** Renaming keeps the web address by default, so links people already have keep working. The owner can tick a box to change the address to match the new name. Editors can change the name and website but not the address. Changing the website does not read it again.
+- **Make a copy without keywords.** Copies the business details, exclusions, campaigns, competitors and what was learned from the website, so a similar client or a second account needs no new site read. The copy belongs to whoever makes it, is named "... (copy)", and has no uploads or keywords.
+- **Download every keyword (CSV)**, **Business details** and **Team and sharing** are shortcuts.
+- **Delete project** (owner only) asks you to type the project's name, and says how many campaigns and keywords go with it and whether it is shared. **Leave project** replaces it for people the project was shared with.
+
+Viewers see only Open, Business details, Team and sharing, Download and Leave.
+
+## After an update
+
+The page files take effect the moment they are pulled, but the server only changes when it restarts. The page asks the server for its version, and if the server is older than the page it shows a red bar across the top saying so. The fix is to restart the service. `GET /api/config` shows `apiVersion` if you want to check from the command line.
+
 A project page has a **sidebar** with everything for that project: All keywords, your campaigns (with a + to add one), Business, Competitors, and Team and sharing.
 
 ## Campaigns
